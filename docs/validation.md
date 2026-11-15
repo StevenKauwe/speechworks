@@ -36,8 +36,11 @@ With base used for both previews and finals, a real-time worker session emitted
 24 previews on WebGPU and 9 on WASM CPU. First preview arrived after about
 507 ms / 761 ms respectively, including speech onset and VAD confirmation.
 Stop-to-final was about 42 ms / 833 ms. Browser fake-microphone capture through
-the actual AudioWorklet, with previews disabled, finalized in about
+the actual AudioWorklet, with previews disabled and `stopTailMs: 0`, finalized in about
 20 ms / 638 ms after stop. All four final phrases retained the final words.
+The worker measurements begin when it receives `stop`; the microphone API's
+default 200 ms capture tail is additional. Worker comparisons used 15-second
+soft/hard phrase limits; the microphone test used the default phrase limits.
 These values describe this fixture and machine, not a latency or accuracy guarantee.
 
 ## Acceptance exercised
