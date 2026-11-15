@@ -5,6 +5,40 @@ use speechworks_inference::{Backend, Model};
 use speechworks_vad::{SampleRate, SileroVad};
 use wasm_bindgen::prelude::*;
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+static THREAD_POOL_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Initialize the optional persistent shared-memory CPU pool before loading any model.
+/// A failed pool is not reusable; discard this module and fall back to the plain artifact.
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+#[wasm_bindgen(js_name = initCpuThreadPool)]
+pub async fn init_cpu_thread_pool(threads: usize) -> Result<(), JsValue> {
+    use std::sync::atomic::Ordering;
+    if !(1..=32).contains(&threads) {
+        return Err(js_error("CPU worker count must be between 1 and 32"));
+    }
+    if THREAD_POOL_STATE
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(js_error(
+            "CPU thread pool initialization is already attempted",
+        ));
+    }
+    match wasm_bindgen_futures::JsFuture::from(wasm_bindgen_rayon::init_thread_pool(threads)).await
+    {
+        Ok(_) => {
+            speechworks_inference::register_wasm_thread_pool();
+            THREAD_POOL_STATE.store(2, Ordering::Release);
+            Ok(())
+        }
+        Err(error) => {
+            THREAD_POOL_STATE.store(3, Ordering::Release);
+            Err(error)
+        }
+    }
+}
+
 fn js_error(error: impl std::fmt::Display) -> JsValue {
     js_sys::Error::new(&error.to_string()).into()
 }
@@ -16,6 +50,12 @@ pub struct Recognizer {
 
 #[wasm_bindgen(js_name = loadModel)]
 pub async fn load_model(bytes: Vec<u8>, backend: String) -> Result<Recognizer, JsValue> {
+    #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+    if THREAD_POOL_STATE.load(std::sync::atomic::Ordering::Acquire) != 2 {
+        return Err(js_error(
+            "Call and await initCpuThreadPool before loading a threaded model",
+        ));
+    }
     let backend = match backend.as_str() {
         "auto" => Backend::Auto,
         "cpu" => Backend::Cpu,

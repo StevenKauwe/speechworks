@@ -25,8 +25,9 @@ Native GPU backends are Metal, Vulkan, and DirectX 12; browser GPU execution use
 WebGPU. `auto` tries the GPU and replays the current phrase on CPU if GPU setup or
 execution fails. `cpu` forces CPU; `gpu` makes GPU failures explicit. Detection
 does not imply that every model is faster on the GPU; benchmark your workload.
-Browsers without WebGPU use a single worker with ordinary WASM SIMD. No relaxed
-SIMD or cross-origin isolation is required.
+Browsers without WebGPU use WASM SIMD CPU inference. Plain SIMD remains the
+compatible fallback; relaxed SIMD and shared-memory workers are optional.
+Cross-origin isolation is not required for the serial fallback.
 
 Live previews currently re-decode the bounded phrase in progress. This provides
 streaming dictation UX, not a cache-aware incremental Moonshine V2 encoder.
@@ -74,6 +75,20 @@ and installs a complete directory. The default manifest downloads from exact
 Hugging Face revisions. Supply `--manifest path/to/models.lock.json` to choose
 other models or download hosts. SHA-256 and byte lengths are required. The
 generated `models.json` points to same-origin, content-addressed model files.
+The normal build includes both plain and relaxed-SIMD serial artifacts. The
+worker probes support before loading the optional faster artifact and preserves
+the compatible fallback. Direct imports of `speechworks_web.js` remain plain
+SIMD; `runtime-loader.js` exposes the feature-selecting `loadRuntime()` helper.
+
+For optional shared-memory CPU workers, see [the threaded build guide](docs/wasm-threads.md).
+Install with `SPEECHWORKS_WASM_THREADS=1` and the pinned nightly prerequisite in
+the guide. When that artifact is installed and hosting supports isolation,
+`createDictation` defaults to a conservative `cpuThreads: 'auto'`: half the
+reported logical processors, capped at four. Unsupported contexts retain the
+fast serial path. Set `cpuThreads: 1` to opt out, or an explicit 2–32 to override.
+The installer does not set server headers or relax CSP. See
+[the follow-up benchmark notes](docs/wasm-cpu-phase2.md).
+
 Serve `.wasm` as `application/wasm`, `.js` as JavaScript, and `.json` as JSON.
 Use HTTPS (localhost is allowed for development), microphone permission, and
 `worker-src 'self'` in your CSP; include `wasm-unsafe-eval` where your CSP requires it.

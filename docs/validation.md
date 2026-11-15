@@ -1,5 +1,8 @@
 # Validation
 
+For the later measured CPU kernel optimization, matched single-thread native
+controls, and cross-machine retest, see [browser CPU performance](wasm-cpu-performance.md).
+
 Recorded 2026-11-15 on an Apple M2 Max, macOS/Darwin 27.2.0, Rust 1.99.1,
 Chrome 157.0.8103.78. The browser reported an Apple `metal-3` adapter with
 `isFallbackAdapter: false`. Its private device name was omitted; the recognizer

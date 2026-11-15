@@ -10,13 +10,26 @@ if [ "$("$bindgen" --version 2>/dev/null || true)" != 'wasm-bindgen 0.2.129' ]; 
     cargo install --locked wasm-bindgen-cli --version 0.2.129 --root "$root/target/bindgen-0.2.129"
   fi
 fi
-# Plain wasm SIMD only: relaxed SIMD is not required for the CPU fallback.
-export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+simd128,-relaxed-simd"
-cargo build --locked --release --target wasm32-unknown-unknown -p speechworks-web
 target=${CARGO_TARGET_DIR:-"$root/target"}
 case "$target" in /*) ;; *) target="$root/$target" ;; esac
 mkdir -p "$root/dist"
-"$bindgen" "$target/wasm32-unknown-unknown/release/speechworks_web.wasm" --target web --out-dir "$root/dist" --out-name speechworks_web
+# Never ship an optional shared-memory build left over from different source. The
+# opt-in installer rebuilds it after both compatible single-thread artifacts.
+rm -rf "$root/dist/threaded"
+flags=${RUSTFLAGS:-}
+for variant in plain relaxed; do
+  feature=-relaxed-simd
+  out="$root/dist"
+  if [ "$variant" = relaxed ]; then
+    feature=+relaxed-simd
+    out="$root/dist/relaxed"
+  fi
+  RUSTFLAGS="$flags -C target-feature=+simd128,$feature" \
+    cargo build --locked --release --target wasm32-unknown-unknown -p speechworks-web
+  mkdir -p "$out"
+  "$bindgen" "$target/wasm32-unknown-unknown/release/speechworks_web.wasm" \
+    --target web --out-dir "$out" --out-name speechworks_web
+done
 cp "$root"/web/*.js "$root/dist/"
 cp "$root/LICENSE" "$root/dist/LICENSE"
 cp "$root/THIRD_PARTY_NOTICES.md" "$root/dist/THIRD_PARTY_NOTICES.md"

@@ -5,6 +5,8 @@
 pub mod gemm;
 pub mod ops;
 pub mod transformer;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod wasm_simd;
 
 use std::sync::{Mutex, OnceLock, PoisonError};
 
@@ -14,15 +16,19 @@ use crate::error::Result;
 use crate::gguf::{Tensor, Type};
 use crate::{Api, Device, DeviceKind, Kernels};
 
-/// Dot product with 16 independent accumulators (four FMA vectors in flight), summed pairwise so
-/// the final reduction also vectorizes.
+/// Dot product with 16 independent accumulators, summed pairwise. Native paths use fused
+/// multiply-add; plain WASM SIMD uses separate multiply/add (see `wasm_simd`).
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    return wasm_simd::dot(a, b);
+
     #[cfg(target_arch = "x86_64")]
     if x86::avx2() {
         // SAFETY: the CPU has AVX2 and FMA.
         return unsafe { x86::dot(a, b) };
     }
 
+    #[allow(unreachable_code)]
     let ((a16, a_tail), (b16, b_tail)) = (a.as_chunks::<16>(), b.as_chunks::<16>());
     let mut acc = [0f32; 16];
     for (x, y) in a16.iter().zip(b16) {
@@ -60,7 +66,11 @@ pub fn path() -> &'static str {
         return "AVX2+FMA";
     }
 
-    if cfg!(target_arch = "aarch64") {
+    if cfg!(all(target_arch = "wasm32", target_feature = "relaxed-simd")) {
+        "WASM SIMD128 + guarded relaxed FMA"
+    } else if cfg!(all(target_arch = "wasm32", target_feature = "simd128")) {
+        "WASM SIMD128"
+    } else if cfg!(target_arch = "aarch64") {
         "NEON"
     } else {
         "portable"
@@ -79,10 +89,24 @@ pub fn device() -> &'static Device {
     })
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+static WASM_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
+/// Called only after wasm-bindgen-rayon successfully initializes its persistent global pool.
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+pub(crate) fn register_wasm_thread_pool() {
+    WASM_THREADS.store(
+        rayon::current_num_threads(),
+        std::sync::atomic::Ordering::Release,
+    );
+}
+
 /// Threads for the encoders' kernels: the CPUs this process may run on (`taskset` and cgroup
 /// limits count).
 pub fn threads() -> usize {
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+    return WASM_THREADS.load(std::sync::atomic::Ordering::Acquire);
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     return 1;
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -109,10 +133,22 @@ pub fn par_each<T: Send, S>(
             f(&mut scratch, item);
         }
     };
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     {
         let _ = spawn;
         work();
+    }
+    #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+    if spawn <= 1 {
+        work();
+    } else {
+        // Persistent WASM workers execute only these CPU closures. No JS/GPU handles move.
+        rayon::scope(|scope| {
+            for _ in 1..spawn {
+                scope.spawn(|_| work());
+            }
+            work();
+        });
     }
     #[cfg(not(target_arch = "wasm32"))]
     std::thread::scope(|s| {
@@ -333,12 +369,22 @@ impl Q8 {
 
     #[cfg(not(target_arch = "aarch64"))]
     fn rows(&self, r0: usize, x: &[f32], out: &mut [f32]) {
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        return wasm_simd::q8_rows(
+            &self.q[r0 * self.k..],
+            &self.d[r0 * self.k / 32..],
+            self.k,
+            x,
+            out,
+        );
+
         #[cfg(target_arch = "x86_64")]
         if x86::avx2() {
             // SAFETY: the CPU has AVX2 and FMA.
             return unsafe { x86::rows(self, r0, x, out) };
         }
 
+        #[allow(unreachable_code)]
         for (r, o) in out.iter_mut().enumerate() {
             *o = dot(&self.row(r0 + r), x);
         }
@@ -490,7 +536,18 @@ mod x86 {
 /// `w · x` for each job `(w, x)`. Blocks of 64 rows go to four scoped threads (an M1/M2 has four
 /// performance cores) as they come free, so a thread on an efficiency core takes fewer.
 pub fn matvecs<const N: usize>(jobs: [(&Matrix, &[f32]); N]) -> [Vec<f32>; N] {
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+    {
+        let mut out = jobs.map(|(w, _)| vec![0.0; w.len()]);
+        let blocks = out.iter_mut().zip(jobs).flat_map(|(out, (w, x))| {
+            out.chunks_mut(64)
+                .enumerate()
+                .map(move |(i, out)| (w, x, 64 * i, out))
+        });
+        par_each(blocks, || (), |_, (w, x, r0, out)| w.rows(r0, x, out));
+        out
+    }
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     return jobs.map(|(m, x)| {
         let mut y = vec![0.0; m.len()];
         m.rows(0, x, &mut y);

@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "test:browser": "node tests/browser-smoke.mjs"
+    "test:browser": "node tests/browser-smoke.mjs",
+    "test:wasm-kernels": "node tests/wasm-kernels.mjs --browser && node tests/wasm-kernels.mjs --relaxed --browser"
   },
   "devDependencies": {"playwright": "1.62.1"}
 }

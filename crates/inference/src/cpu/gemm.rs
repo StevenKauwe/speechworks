@@ -1,7 +1,9 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo
 //! Matrix products of the encoders on the CPU: `c = epilogue(a·Wᵀ + b)` with W kept in its GGUF
 //! type. W is unpacked 16 rows at a time into f32 panels `[k][16]`, and a tile of 6 rows × 16
-//! columns of fused multiply-adds (AVX2+FMA, NEON, else portable) runs over the rows of `a`. A job
+//! columns of fused multiply-adds (AVX2+FMA, NEON, else portable) runs over the rows of `a`.
+//! The optional relaxed-WASM build uses four-row tiles and guarded fused arithmetic for
+//! finite half-rounded linear GEMM only; attention products retain plain SIMD arithmetic. A job
 //! unpacks a group of panels that fits the L2 cache once and runs them over a range of rows,
 //! 6 rows of `a` at a time while they are in L1; threads take jobs as they come free. W and `a`
 //! are rounded to f16 first, as the GPU's GEMM rounds them (a near-tie of ivrit he-long falls on
@@ -23,6 +25,9 @@ use crate::gpu::Epilogue;
 /// Panel width: output columns per tile.
 pub const NR: usize = 16;
 /// Rows of `a` per tile.
+#[cfg(all(target_arch = "wasm32", target_feature = "relaxed-simd"))]
+const MR: usize = 4;
+#[cfg(not(all(target_arch = "wasm32", target_feature = "relaxed-simd")))]
 const MR: usize = 6;
 /// Bytes of the panels a job unpacks.
 const GROUP: usize = 384 << 10;
@@ -40,6 +45,8 @@ pub struct Linear {
     w: Weights,
     /// `n` values, zeros without a bias.
     bias: Vec<f32>,
+    #[cfg(all(target_arch = "wasm32", target_feature = "relaxed-simd"))]
+    half_bounded: bool,
 }
 
 impl Linear {
@@ -85,7 +92,20 @@ impl Linear {
         }
 
         let bias = if bias.is_empty() { vec![0.0; n] } else { bias };
-        Ok(Self { n, k, w, bias })
+        #[cfg(all(target_arch = "wasm32", target_feature = "relaxed-simd"))]
+        let half_bounded = match &w {
+            Weights::Q8(q) => super::wasm_simd::q8_half_bounded(&q.d),
+            Weights::F16(w) => w.iter().all(|w| w.is_finite()),
+            Weights::F32(w) => super::wasm_simd::half_bounded(w),
+        };
+        Ok(Self {
+            n,
+            k,
+            w,
+            bias,
+            #[cfg(all(target_arch = "wasm32", target_feature = "relaxed-simd"))]
+            half_bounded,
+        })
     }
 
     /// Row `r` of W in f32.
@@ -185,6 +205,8 @@ pub fn gemm(a: &[f32], l: &Linear, c: &mut [f32], m: usize, epilogue: Epilogue) 
         );
     }
     let a: Vec<f32> = a[..m * k].iter().map(|&x| to_half(x)).collect();
+    #[cfg(all(target_arch = "wasm32", target_feature = "relaxed-simd"))]
+    let use_fma = l.half_bounded && super::wasm_simd::half_bounded(&a);
     let kb = k * NR;
     jobs(
         l,
@@ -195,6 +217,14 @@ pub fn gemm(a: &[f32], l: &Linear, c: &mut [f32], m: usize, epilogue: Epilogue) 
         |panels| (vec![0.0; panels * kb], vec![0.0; k]),
         |(b, wide), i, p| l.pack(p, &mut b[i * kb..][..kb], wide),
         |(b, _), i, row, last| {
+            #[cfg(all(target_arch = "wasm32", target_feature = "relaxed-simd"))]
+            if use_fma {
+                return super::wasm_simd::rounded_gemm_tile(
+                    std::array::from_fn(|r| &a[(row + r).min(last - 1) * k..][..k]),
+                    &b[i * kb..][..kb],
+                    k,
+                );
+            }
             tile(
                 std::array::from_fn(|r| &a[(row + r).min(last - 1) * k..][..k]),
                 &b[i * kb..][..kb],
