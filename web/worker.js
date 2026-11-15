@@ -1,4 +1,5 @@
-import init, {loadModel, DictationSession} from './speechworks_web.js';
+import {loadRuntime, cpuThreadOption} from './runtime-loader.js';
+import {createWorkerOwner} from './pool-owner.js';
 
 const describe = error => error?.message || String(error);
 
@@ -9,13 +10,28 @@ export function startWorker(options = {}) {
   let manifestPromise, recording = null, running = false, activeClip = false, clipQueue = [], queuedSamples = 0;
   const models = new Map();
   const devices = new Map();
-  const ready = init();
+  let runtime, runtimeReady;
+  function ensureRuntime() {
+    return runtimeReady ||= loadRuntime(settings, {
+      workerOwner: settings.poolOwner === 'ui-v1' ? workerOwner : undefined,
+      onWorkerError: error => send({type: 'error', message: describe(error)}),
+    }).then(value => { runtime = value; return value; });
+  }
   const send = data => self.postMessage(data);
+  const workerOwner = createWorkerOwner(send);
+  let computeSequence = 0;
+  async function transcribe(recognizer, samples) {
+    const token = ++computeSequence;
+    const threaded = runtime.cpuThreads > 1;
+    if (threaded) send({type: 'speechworks:inference-start', token});
+    try { return await recognizer.transcribe(samples); }
+    finally { if (threaded) send({type: 'speechworks:inference-end', token}); }
+  }
   function reportBackend(id,recognizer) {
-    const device=recognizer.device(),fallback=recognizer.fallbackReason();
+    const device=recognizer.device();
+    const fallback=[recognizer.fallbackReason(), runtime.fallbackReason].filter(Boolean).join('; ') || undefined;
     if(devices.get(id)!==device) {devices.set(id,device);send({type:'backend',model:id,device,fallback});}
   }
-  ready.then(() => send({type:'ready'}), error => send({type:'error', message:describe(error)}));
 
   async function manifest() {
     return manifestPromise ||= (async () => {
@@ -36,7 +52,7 @@ export function startWorker(options = {}) {
     if (models.has(id)) return models.get(id);
     if (models.size >= 2) throw new Error('At most two models may be resident; create another engine to change profiles.');
     const promise = (async () => {
-      await ready;
+      await ensureRuntime();
       const spec = (await manifest()).models[id];
       if (!spec || !/^[a-f0-9]{64}$/.test(spec.sha256) || !Number.isSafeInteger(spec.bytes)
           || spec.bytes < 1 || spec.bytes > 512 * 1024 * 1024) throw new Error(`Invalid model specification: ${id}`);
@@ -73,7 +89,7 @@ export function startWorker(options = {}) {
       if (!fromCache) {
         try { await cache?.put(url.href,new Response(bytes, {headers:{'Content-Type':'application/octet-stream'}})); } catch { /* Quota does not prevent local inference. */ }
       }
-      const recognizer = await loadModel(bytes,settings.backend);
+      const recognizer = await runtime.loadModel(bytes,settings.backend);
       reportBackend(id,recognizer);
       return recognizer;
     })();
@@ -107,7 +123,7 @@ export function startWorker(options = {}) {
               const profile = await choices();
               const recognizer = await model(isFinal ? profile.final : profile.draft);
               const began = performance.now();
-              const text = (await recognizer.transcribe(job.samples)).trim();
+              const text = (await transcribe(recognizer, job.samples)).trim();
               reportBackend(isFinal ? profile.final : profile.draft,recognizer);
               // Leave at least as much time for capture/VAD as the preceding preview
               // consumed. Faster GPUs retain the configured audio-time cadence.
@@ -129,18 +145,18 @@ export function startWorker(options = {}) {
           const profile = await choices();
           const recognizer = await model(clip.model || profile.final);
           let text;
-          if (clip.samples.length <= 30*16000) text = (await recognizer.transcribe(clip.samples)).trim();
+          if (clip.samples.length <= 30*16000) text = (await transcribe(recognizer, clip.samples)).trim();
           else {
-            const session = new DictationSession({...settings.session,previews:false});
+            const session = new runtime.DictationSession({...settings.session,previews:false});
             const texts=[];
             try {
               for(let offset=0;offset<clip.samples.length;offset+=512) {
                 const frame=new Float32Array(512);frame.set(clip.samples.subarray(offset,offset+512));session.push(frame);
                 let job;
-                while((job=session.nextFinal())) { try{texts.push((await recognizer.transcribe(job.samples)).trim());}finally{job.free();} }
+                while((job=session.nextFinal())) { try{texts.push((await transcribe(recognizer, job.samples)).trim());}finally{job.free();} }
               }
               session.finish();let job;
-              while((job=session.nextFinal())) {try{texts.push((await recognizer.transcribe(job.samples)).trim());}finally{job.free();}}
+              while((job=session.nextFinal())) {try{texts.push((await transcribe(recognizer, job.samples)).trim());}finally{job.free();}}
               text=texts.filter(Boolean).join(' ');
             } finally {session.free();}
           }
@@ -152,19 +168,29 @@ export function startWorker(options = {}) {
     } finally { running = false; }
   }
   self.onmessage = async ({data:m}) => {
+    if (workerOwner.handleMessage(m)) return;
     try {
-      await ready;
       if (m.type === 'configure') {
         if (recording || models.size || clipQueue.length) throw new Error('Configure the engine before loading a model.');
-        settings = {...settings,...m.options};
+        const next = {...settings,...m.options};
+        const threads = cpuThreadOption(next);
+        if (runtimeReady && (threads !== cpuThreadOption(settings)
+            || next.poolOwner !== settings.poolOwner)) {
+          throw new Error('Runtime configuration cannot change after initialization starts; create another worker.');
+        }
+        settings = next;
         settings.manifestUrl = new URL(settings.manifestUrl,self.location.href).href;
         manifestPromise = null;
+        await ensureRuntime();
         await manifest(); send({type:'configured',id:m.id});
-      } else if (m.type === 'preload') {
+        return;
+      }
+      await ensureRuntime();
+      if (m.type === 'preload') {
         await preload(); send({type:'loaded',id:m.id});
       } else if (m.type === 'start') {
         if (recording || activeClip || clipQueue.length) throw new Error('A transcription is already active.');
-        recording = {id:m.session,session:new DictationSession({...settings.session,...m.config}),stopping:false,cancelled:false,previewNotBefore:0};
+        recording = {id:m.session,session:new runtime.DictationSession({...settings.session,...m.config}),stopping:false,cancelled:false,previewNotBefore:0};
         send({type:'started',id:m.id,session:m.session});
       } else if (m.type === 'audio' && recording?.id === m.session) {
         const r = recording;
@@ -188,4 +214,7 @@ export function startWorker(options = {}) {
       }
     } catch (error) { send({type:'error',id:m.id,session:m.session,message:describe(error)}); }
   };
+  // Channel readiness must not wait for configure: low-level clients may wait
+  // for this event before choosing cpuThreads. Models/sessions still await WASM.
+  queueMicrotask(() => send({type:'ready'}));
 }

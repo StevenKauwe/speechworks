@@ -5,3 +5,6 @@
 /node_modules/
 *.tmp
 .DS_Store
+
+/target-threaded/
+/dist-threaded/

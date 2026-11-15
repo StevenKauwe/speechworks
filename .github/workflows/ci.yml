@@ -36,7 +36,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npx playwright install --with-deps chromium
-      - name: WASM SIMD numerical and bounds regression
+      - name: Plain and guarded relaxed-SIMD numerical/bounds regression
         run: npm run test:wasm-kernels
       - name: Build runtime and verify pinned models
         run: tools/install-web.sh --dest "$RUNNER_TEMP/speechworks" --model-dir "$RUNNER_TEMP/models"
@@ -52,4 +52,34 @@ jobs:
         if: always()
         with:
           name: browser-cpu-evidence
+          path: test-results/
+
+  browser-threaded:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Install pinned shared-memory compiler without changing default
+        run: rustup toolchain install nightly-2026-11-14 --profile minimal --component rust-src --target wasm32-unknown-unknown
+      - name: Install all runtime variants and verified models
+        run: SPEECHWORKS_WASM_THREADS=1 tools/install-web.sh --dest "$RUNNER_TEMP/speechworks" --model-dir "$RUNNER_TEMP/models"
+      - name: Fetch and verify public-domain speech fixture
+        run: |
+          curl --fail --location --output "$RUNNER_TEMP/models/jfk.wav" https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav
+          echo "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e  $RUNNER_TEMP/models/jfk.wav" | sha256sum --check
+      - name: Isolated and non-isolated client lifecycle acceptance
+        run: node tests/browser-lifecycle.mjs --root "$RUNNER_TEMP/speechworks" --fixture "$RUNNER_TEMP/models/jfk.wav" --output test-results/browser-lifecycle.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-threaded-evidence
           path: test-results/

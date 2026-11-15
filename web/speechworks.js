@@ -1,4 +1,5 @@
 import {Transcript} from './transcript.js';
+import {createPoolOwner} from './pool-owner.js';
 
 /** Local dictation. Models, backend and phrase policy are application config.
  * Audio is sent only to a local Web Worker. No network transcription fallback. */
@@ -6,6 +7,7 @@ export function createDictation(options = {}) {
   const workerUrl = options.workerUrl || new URL('./worker-entry.js', import.meta.url);
   const manifestUrl = new URL(options.manifestUrl || './models.json', import.meta.url).href;
   const listeners = new Set(), requests = new Map();
+  const pools = new WeakMap();
   let worker, configuring, loaded, active = null, sequence = 0;
   let status = {ready: false, progress: 0};
   const cancelledError = () => new DOMException('Dictation cancelled.', 'AbortError');
@@ -20,6 +22,8 @@ export function createDictation(options = {}) {
   function rejectAll(error, connection = worker) {
     if (connection !== worker) return;
     worker = null; configuring = null; loaded = null;
+    // Children are owned here, not by a possibly blocked inference coordinator.
+    if (connection) { pools.get(connection)?.dispose(); pools.delete(connection); }
     connection?.terminate();
     for (const pending of requests.values()) pending.reject(error);
     requests.clear();
@@ -31,13 +35,16 @@ export function createDictation(options = {}) {
       requests.delete(key); pending.reject(error);
     }
   }
-  function request(type, data = {}) {
+  function requireConnection(connection) {
+    if (!connection || connection !== worker) throw new Error('Speech engine closed or replaced.');
+  }
+  function request(type, data = {}, connection = worker) {
     const id = ++sequence;
     return new Promise((resolve, reject) => {
       requests.set(id, {resolve, reject, session: data.session});
       try {
-        if (!worker) throw new Error('Speech worker is not running.');
-        worker.postMessage({type, id, ...data});
+        requireConnection(connection);
+        connection.postMessage({type, id, ...data});
       } catch (error) {
         requests.delete(id); reject(error);
       }
@@ -47,6 +54,11 @@ export function createDictation(options = {}) {
     if (configuring) return configuring;
     const connection = new Worker(workerUrl, {type: 'module'});
     worker = connection;
+    pools.set(connection, createPoolOwner({
+      workerUrl: new URL(workerUrl, globalThis.location?.href || import.meta.url),
+      postMessage: message => connection.postMessage(message),
+      onFatal: error => rejectAll(error, connection),
+    }));
     connection.onerror = event => {
       event.preventDefault();
       rejectAll(new Error(event.message || 'Speech worker stopped.'), connection);
@@ -54,6 +66,7 @@ export function createDictation(options = {}) {
     connection.onmessageerror = () => rejectAll(new Error('Speech worker returned an unreadable message.'), connection);
     connection.onmessage = ({data: m}) => {
       if (worker !== connection) return;
+      if (pools.get(connection)?.handleMessage(m)) return;
       if (m.type === 'progress') update({progress: m.value, model: m.model});
       if (m.type === 'backend') update({device:m.device, fallback:m.fallback, model:m.model});
       if (m.type === 'error') {
@@ -65,16 +78,27 @@ export function createDictation(options = {}) {
       if (m.session && active?.id === m.session) active.receive(m);
     };
     configuring = request('configure', {options: {
-      manifestUrl, backend: options.backend || 'auto', models: options.models, session: options.session,
+      manifestUrl, poolOwner: 'ui-v1', cpuThreads: options.cpuThreads, backend: options.backend || 'auto', models: options.models, session: options.session,
     }}).catch(error => { rejectAll(error, connection); throw error; });
     return configuring;
   }
   async function preload() {
     if (loaded) return loaded;
-    loaded = (async () => {
-      await boot(); await request('preload'); update({ready: true, progress: 1, error: undefined});
-    })().catch(error => { loaded = null; update({ready: false, error: error.message}); throw error; });
-    return loaded;
+    const ready = boot(), connection = worker;
+    const pending = (async () => {
+      await ready;
+      await request('preload', {}, connection);
+      requireConnection(connection);
+      update({ready: true, progress: 1, error: undefined});
+    })().catch(error => {
+      if (worker === connection && loaded === pending) {
+        loaded = null;
+        update({ready: false, error: error.message});
+      }
+      throw error;
+    });
+    loaded = pending;
+    return pending;
   }
   async function isCached() {
     try {
@@ -89,7 +113,7 @@ export function createDictation(options = {}) {
   async function record({onText = () => {}, onError = () => {}, signal, session = {}} = {}) {
     if (active) throw new Error('Dictation is already active.');
     const id = ++sequence, transcript = new Transcript();
-    let stream, context, tap, analyser, finished = false, captureClosed = false;
+    let connection, stream, context, tap, analyser, finished = false, captureClosed = false;
     let stopPromise, flushWaiter, outstanding = 0, failure;
     let resolveDone, rejectDone, rejectCancelled;
     const done = new Promise((resolve, reject) => { resolveDone = resolve; rejectDone = reject; });
@@ -98,6 +122,7 @@ export function createDictation(options = {}) {
     const wait = async operation => {
       const value = await Promise.race([operation, cancelled]);
       if (finished) throw failure || cancelledError();
+      requireConnection(connection);
       return value;
     };
     const closeCapture = error => {
@@ -116,7 +141,7 @@ export function createDictation(options = {}) {
       if (finished) return;
       failure = error; finished = true; close(error);
       // Closing a failed worker or a detached port must not interrupt cleanup.
-      try { worker?.postMessage({type: 'cancel', session: id}); } catch {}
+      try { if (connection === worker) connection?.postMessage({type: 'cancel', session: id}); } catch {}
       if (active === state) active = null;
       rejectSession(id, error); rejectCancelled(error); rejectDone(error);
       try { onError(error); } catch { /* A failing error callback must not keep the mic open. */ }
@@ -142,7 +167,8 @@ export function createDictation(options = {}) {
     signal?.addEventListener('abort', abort, {once: true});
     try {
       if (signal?.aborted) throw cancelledError();
-      await wait(preload());
+      const ready = preload(); connection = worker;
+      await wait(ready);
       const capture = navigator.mediaDevices.getUserMedia({audio: {
         channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true,
       }}).then(value => {
@@ -160,15 +186,15 @@ export function createDictation(options = {}) {
       await wait(context.audioWorklet.addModule(new URL('./capture-worklet.js', import.meta.url)));
       tap = new AudioWorkletNode(context, 'speechworks-capture');
       analyser = context.createAnalyser(); analyser.fftSize = 512;
-      await wait(request('start', {session: id, config: session}));
+      await wait(request('start', {session: id, config: session}, connection));
       tap.port.onmessage = ({data}) => {
         if (data.flushed) { const waiter = flushWaiter; flushWaiter = null; waiter?.resolve(); return; }
         if (finished || !data.samples) return;
         try {
           outstanding += data.samples.length;
           if (outstanding > context.sampleRate * 5) throw new Error('Speech recognition cannot keep up with this microphone. Try final-only mode.');
-          if (!worker) throw new Error('Speech worker is not running.');
-          worker.postMessage({type: 'audio', session: id, samples: data.samples, sampleRate: context.sampleRate}, [data.samples.buffer]);
+          requireConnection(connection);
+          connection.postMessage({type: 'audio', session: id, samples: data.samples, sampleRate: context.sampleRate}, [data.samples.buffer]);
         } catch (error) { fail(error); }
       };
       source.connect(analyser); source.connect(tap); tap.connect(context.destination);
@@ -198,8 +224,8 @@ export function createDictation(options = {}) {
               }));
             } finally { clearTimeout(timer); flushWaiter = null; }
             closeCapture();
-            if (!worker) throw new Error('Speech worker is not running.');
-            worker.postMessage({type: 'stop', session: id});
+            requireConnection(connection);
+            connection.postMessage({type: 'stop', session: id});
           } catch (error) { fail(error); }
           return done;
         })();
@@ -211,7 +237,11 @@ export function createDictation(options = {}) {
     onStatus(fn) { listeners.add(fn); try { fn({...status}); } catch {} return () => listeners.delete(fn); },
     isCached, preload, record,
     async transcribe(samples, {model, priority = false} = {}) {
-      await boot(); return (await request('transcribe', {samples, model, priority})).text;
+      const ready = boot(), connection = worker;
+      await ready;
+      const result = await request('transcribe', {samples, model, priority}, connection);
+      requireConnection(connection);
+      return result.text;
     },
     destroy() {
       active?.fail(new DOMException('Speech engine closed.', 'AbortError'));

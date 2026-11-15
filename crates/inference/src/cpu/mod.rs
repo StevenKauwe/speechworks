@@ -66,7 +66,9 @@ pub fn path() -> &'static str {
         return "AVX2+FMA";
     }
 
-    if cfg!(all(target_arch = "wasm32", target_feature = "simd128")) {
+    if cfg!(all(target_arch = "wasm32", target_feature = "relaxed-simd")) {
+        "WASM SIMD128 + guarded relaxed FMA"
+    } else if cfg!(all(target_arch = "wasm32", target_feature = "simd128")) {
         "WASM SIMD128"
     } else if cfg!(target_arch = "aarch64") {
         "NEON"
@@ -87,10 +89,24 @@ pub fn device() -> &'static Device {
     })
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+static WASM_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
+/// Called only after wasm-bindgen-rayon successfully initializes its persistent global pool.
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+pub(crate) fn register_wasm_thread_pool() {
+    WASM_THREADS.store(
+        rayon::current_num_threads(),
+        std::sync::atomic::Ordering::Release,
+    );
+}
+
 /// Threads for the encoders' kernels: the CPUs this process may run on (`taskset` and cgroup
 /// limits count).
 pub fn threads() -> usize {
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+    return WASM_THREADS.load(std::sync::atomic::Ordering::Acquire);
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     return 1;
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -117,10 +133,22 @@ pub fn par_each<T: Send, S>(
             f(&mut scratch, item);
         }
     };
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     {
         let _ = spawn;
         work();
+    }
+    #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+    if spawn <= 1 {
+        work();
+    } else {
+        // Persistent WASM workers execute only these CPU closures. No JS/GPU handles move.
+        rayon::scope(|scope| {
+            for _ in 1..spawn {
+                scope.spawn(|_| work());
+            }
+            work();
+        });
     }
     #[cfg(not(target_arch = "wasm32"))]
     std::thread::scope(|s| {
@@ -508,7 +536,18 @@ mod x86 {
 /// `w · x` for each job `(w, x)`. Blocks of 64 rows go to four scoped threads (an M1/M2 has four
 /// performance cores) as they come free, so a thread on an efficiency core takes fewer.
 pub fn matvecs<const N: usize>(jobs: [(&Matrix, &[f32]); N]) -> [Vec<f32>; N] {
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+    {
+        let mut out = jobs.map(|(w, _)| vec![0.0; w.len()]);
+        let blocks = out.iter_mut().zip(jobs).flat_map(|(out, (w, x))| {
+            out.chunks_mut(64)
+                .enumerate()
+                .map(move |(i, out)| (w, x, 64 * i, out))
+        });
+        par_each(blocks, || (), |_, (w, x, r0, out)| w.rows(r0, x, out));
+        out
+    }
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     return jobs.map(|(m, x)| {
         let mut y = vec![0.0; m.len()];
         m.rows(0, x, &mut y);

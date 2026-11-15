@@ -1,0 +1,634 @@
+{
+  "recordedAt": "2026-11-15T22:46:34.111Z",
+  "methodology": "Actual createDictation CPU API. Fresh browser context per thread setting, sequential runs; each tiny/base model gets a full JFK warmup before 1/3/5/11/3-second prefixes, five repetitions by default. Models remain loaded, initialization/downloads excluded from timed transcribe calls. Main-page heartbeat sampled every10ms during timed calls; logical CPU count is not an idle-core measurement.",
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "cpu": "Apple M2 Max",
+    "browser": "157.0.8103.78"
+  },
+  "artifactSha256": {
+    "speechworks.js": "223126d60553a28b6bf4b2b882c459f122a17b138657dbe053d5a523da74b224",
+    "pool-owner.js": "fb4171a080dac8c10b662f7f986950c748f827c1b2a84182e1fd8ef8aa82f9f0",
+    "worker.js": "ff41ea54cb0f903418e452ce0091d9e78abd59052b61e9f3ec0720dc3c7ab530",
+    "runtime-loader.js": "12e32954d3e6feeda6dce2e3eb9c54d23f660e5eeeff1a11c6ed6fbcf9881fc7",
+    "runtime-config.js": "7a1972bc40c660a5623f0d33b1b3d038d12f71f97978241015801ddae2721452",
+    "speechworks_web_bg.wasm": "1f2d53b3d790cb6d098e12e16cb0e3c9de0cef8593149aa0227e10e4d12b5ece",
+    "relaxed/speechworks_web_bg.wasm": "6a84613e3a3f8c0066356a9fc0bef588ea40a44bd18c24aa4006fdd892d336ec",
+    "threaded/thread-pool.js": "67ecbbcf6d61645b34f7cc0aa75db114de7a5ddfec6269ae530c2cc4f910387a",
+    "threaded/speechworks_web_bg.wasm": "c8355a06a73a64c81702c2c212babd0942c5fedfaffa4ebd192fa4effdc32c76"
+  },
+  "fixtureSha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+  "passed": true,
+  "models": {
+    "base": {
+      "sha256": "7f0027dfd857d310b63a85ef57cadf183da712cc374f85a648f8bc18aaa2efc8",
+      "bytes": 77476480,
+      "architecture": "moonshine"
+    },
+    "tiny": {
+      "sha256": "2fd348d7b38f97d309cc3ec6848f3f57f537b80244950f07d2637e463f95a3a1",
+      "bytes": 35466912,
+      "architecture": "moonshine"
+    }
+  },
+  "runs": [
+    {
+      "requestedThreads": "auto",
+      "preloadMs": 267.625,
+      "hardwareConcurrency": 12,
+      "crossOriginIsolated": true,
+      "direct": [
+        {
+          "id": "tiny",
+          "firstMs": 259.3949999809265,
+          "firstText": "And so my fellow Americans ask not what your country can do for you, ask what you can do for your country.",
+          "device": "CPU (WASM SIMD128 + guarded relaxed FMA, 4 threads)",
+          "clips": [
+            {
+              "audioSeconds": 1,
+              "timesMs": [
+                15.359999895095825,
+                15.315000057220459,
+                15.424999952316284,
+                15.40999984741211,
+                15.335000038146973
+              ],
+              "medianMs": 15.359999895095825,
+              "text": "And so,"
+            },
+            {
+              "audioSeconds": 3,
+              "timesMs": [
+                31.72499990463257,
+                31.50499987602234,
+                31.605000019073486,
+                31.350000143051147,
+                31.40999984741211
+              ],
+              "medianMs": 31.50499987602234,
+              "text": "And so my fellow Americans."
+            },
+            {
+              "audioSeconds": 5,
+              "timesMs": [
+                48.33999991416931,
+                48.42500019073486,
+                48.49000000953674,
+                48.33999991416931,
+                48.91000008583069
+              ],
+              "medianMs": 48.42500019073486,
+              "text": "And so my fellow Americans ask not."
+            },
+            {
+              "audioSeconds": 11,
+              "timesMs": [
+                123.27500009536743,
+                121.97499990463257,
+                122.21500015258789,
+                121.74499988555908,
+                122.34000015258789
+              ],
+              "medianMs": 122.21500015258789,
+              "text": "And so my fellow Americans ask not what your country can do for you, ask what you can do for your country."
+            },
+            {
+              "audioSeconds": 3,
+              "timesMs": [
+                31.299999952316284,
+                31.369999885559082,
+                31.46500015258789,
+                31.365000009536743,
+                31.269999980926514
+              ],
+              "medianMs": 31.365000009536743,
+              "text": "And so my fellow Americans."
+            }
+          ]
+        },
+        {
+          "id": "base",
+          "firstMs": 240.45499992370605,
+          "firstText": "And so my fellow Americans ask not what your country can do for you ask what you can do for your country",
+          "device": "CPU (WASM SIMD128 + guarded relaxed FMA, 4 threads)",
+          "clips": [
+            {
+              "audioSeconds": 1,
+              "timesMs": [
+                28.710000038146973,
+                27.52500009536743,
+                27.210000038146973,
+                27.294999837875366,
+                27.884999990463257
+              ],
+              "medianMs": 27.52500009536743,
+              "text": "And so"
+            },
+            {
+              "audioSeconds": 3,
+              "timesMs": [
+                65.53999996185303,
+                63.77500009536743,
+                64.00499987602234,
+                63.81500005722046,
+                64.22000002861023
+              ],
+              "medianMs": 64.00499987602234,
+              "text": "And so my fellow Americans."
+            },
+            {
+              "audioSeconds": 5,
+              "timesMs": [
+                93.85999989509583,
+                93.83500003814697,
+                95.4300000667572,
+                94.20499992370605,
+                124.98499989509583
+              ],
+              "medianMs": 94.20499992370605,
+              "text": "And so my fellow Americans ask not"
+            },
+            {
+              "audioSeconds": 11,
+              "timesMs": [
+                238.61500000953674,
+                235.26500010490417,
+                236.3349997997284,
+                236.46000003814697,
+                235.42000007629395
+              ],
+              "medianMs": 236.3349997997284,
+              "text": "And so my fellow Americans ask not what your country can do for you ask what you can do for your country"
+            },
+            {
+              "audioSeconds": 3,
+              "timesMs": [
+                79.59999990463257,
+                80.94500017166138,
+                75.29999995231628,
+                76.5149998664856,
+                78.75500011444092
+              ],
+              "medianMs": 78.75500011444092,
+              "text": "And so my fellow Americans."
+            }
+          ]
+        }
+      ],
+      "heartbeat": {
+        "samples": 376,
+        "maxGapMs": 19.77500009536743,
+        "p95GapMs": 12.009999990463257
+      }
+    },
+    {
+      "requestedThreads": 1,
+      "preloadMs": 253.06499981880188,
+      "hardwareConcurrency": 12,
+      "crossOriginIsolated": true,
+      "direct": [
+        {
+          "id": "tiny",
+          "firstMs": 416.8900001049042,
+          "firstText": "And so my fellow Americans ask not what your country can do for you, ask what you can do for your country.",
+          "device": "CPU (WASM SIMD128 + guarded relaxed FMA, 1 threads)",
+          "clips": [
+            {
+              "audioSeconds": 1,
+              "timesMs": [
+                29.179999828338623,
+                29.200000047683716,
+                28.009999990463257,
+                27.704999923706055,
+                27.65499997138977
+              ],
+              "medianMs": 28.009999990463257,
+              "text": "And so,"
+            },
+            {
+              "audioSeconds": 3,
+              "timesMs": [
+                71.82999992370605,
+                71.16499996185303,
+                71.36500000953674,
+                69.26999998092651,
+                67.96499991416931
+              ],
+              "medianMs": 71.16499996185303,
+              "text": "And so my fellow Americans."
+            },
+            {
+              "audioSeconds": 5,
+              "timesMs": [
+                110.91999983787537,
+                109.70000004768372,
+                109.71499991416931,
+                110.45000004768372,
+                109.97499990463257
+              ],
+              "medianMs": 109.97499990463257,
+              "text": "And so my fellow Americans ask not."
+            },
+            {
+              "audioSeconds": 11,
+              "timesMs": [
+                288.3049998283386,
+                287.45500016212463,
+                287.5349998474121,
+                287.3599998950958,
+                287.4500000476837
+              ],
+              "medianMs": 287.45500016212463,
+              "text": "And so my fellow Americans ask not what your country can do for you, ask what you can do for your country."
+            },
+            {
+              "audioSeconds": 3,
+              "timesMs": [
+                67.35500001907349,
+                67.33999991416931,
+                67.35500001907349,
+                67.33500003814697,
+                67.2649998664856
+              ],
+              "medianMs": 67.33999991416931,
+              "text": "And so my fellow Americans."
+            }
+          ]
+        },
+        {
+          "id": "base",
+          "firstMs": 601.0250000953674,
+          "firstText": "And so my fellow Americans ask not what your country can do for you ask what you can do for your country",
+          "device": "CPU (WASM SIMD128 + guarded relaxed FMA, 1 threads)",
+          "clips": [
+            {
+              "audioSeconds": 1,
+              "timesMs": [
+                57.360000133514404,
+                57.22499990463257,
+                57.25,
+                57.22999978065491,
+                57.325000047683716
+              ],
+              "medianMs": 57.25,
+              "text": "And so"
+            },
+            {
+              "audioSeconds": 3,
+              "timesMs": [
+                148.8199999332428,
+                148.90000009536743,
+                148.75,
+                148.8550000190735,
+                149.7649998664856
+              ],
+              "medianMs": 148.8550000190735,
+              "text": "And so my fellow Americans."
+            },
+            {
+              "audioSeconds": 5,
+              "timesMs": [
+                235.57000017166138,
+                235.35999989509583,
+                236.07500004768372,
+                235.62999987602234,
+                236.17500019073486
+              ],
+              "medianMs": 235.62999987602234,
+              "text": "And so my fellow Americans ask not"
+            },
+            {
+              "audioSeconds": 11,
+              "timesMs": [
+                603.460000038147,
+                625.335000038147,
+                598.0449998378754,
+                621.6400001049042,
+                606.0199999809265
+              ],
+              "medianMs": 606.0199999809265,
+              "text": "And so my fellow Americans ask not what your country can do for you ask what you can do for your country"
+            },
+            {
+              "audioSeconds": 3,
+              "timesMs": [
+                151.9800000190735,
+                149.02999997138977,
+                148.74000000953674,
+                149.21000003814697,
+                148.91499996185303
+              ],
+              "medianMs": 149.02999997138977,
+              "text": "And so my fellow Americans."
+            }
+          ]
+        }
+      ],
+      "heartbeat": {
+        "samples": 884,
+        "maxGapMs": 12.039999961853027,
+        "p95GapMs": 11.015000104904175
+      }
+    },
+    {
+      "requestedThreads": 2,
+      "preloadMs": 272.82999992370605,
+      "hardwareConcurrency": 12,
+      "crossOriginIsolated": true,
+      "direct": [
+        {
+          "id": "tiny",
+          "firstMs": 310.585000038147,
+          "firstText": "And so my fellow Americans ask not what your country can do for you, ask what you can do for your country.",
+          "device": "CPU (WASM SIMD128 + guarded relaxed FMA, 2 threads)",
+          "clips": [
+            {
+              "audioSeconds": 1,
+              "timesMs": [
+                19.609999895095825,
+                19.569999933242798,
+                19.59000015258789,
+                19.59499979019165,
+                19.485000133514404
+              ],
+              "medianMs": 19.59000015258789,
+              "text": "And so,"
+            },
+            {
+              "audioSeconds": 3,
+              "timesMs": [
+                44.1949999332428,
+                44.22500014305115,
+                44.14999985694885,
+                44.1800000667572,
+                44.46000003814697
+              ],
+              "medianMs": 44.1949999332428,
+              "text": "And so my fellow Americans."
+            },
+            {
+              "audioSeconds": 5,
+              "timesMs": [
+                69.82499980926514,
+                69.93500018119812,
+                69.59500002861023,
+                69.55499982833862,
+                69.98000001907349
+              ],
+              "medianMs": 69.82499980926514,
+              "text": "And so my fellow Americans ask not."
+            },
+            {
+              "audioSeconds": 11,
+              "timesMs": [
+                179.08500003814697,
+                178.20000004768372,
+                178.25,
+                178.38499999046326,
+                178.37000012397766
+              ],
+              "medianMs": 178.37000012397766,
+              "text": "And so my fellow Americans ask not what your country can do for you, ask what you can do for your country."
+            },
+            {
+              "audioSeconds": 3,
+              "timesMs": [
+                43.950000047683716,
+                44.125,
+                44.03999996185303,
+                44.11500000953674,
+                44.079999923706055
+              ],
+              "medianMs": 44.079999923706055,
+              "text": "And so my fellow Americans."
+            }
+          ]
+        },
+        {
+          "id": "base",
+          "firstMs": 361.8949999809265,
+          "firstText": "And so my fellow Americans ask not what your country can do for you ask what you can do for your country",
+          "device": "CPU (WASM SIMD128 + guarded relaxed FMA, 2 threads)",
+          "clips": [
+            {
+              "audioSeconds": 1,
+              "timesMs": [
+                38.200000047683716,
+                38.549999952316284,
+                37.35000014305115,
+                37.359999895095825,
+                37.28500008583069
+              ],
+              "medianMs": 37.359999895095825,
+              "text": "And so"
+            },
+            {
+              "audioSeconds": 3,
+              "timesMs": [
+                93.7350001335144,
+                94.59999990463257,
+                93.96000003814697,
+                94.32999992370605,
+                93.85500001907349
+              ],
+              "medianMs": 93.96000003814697,
+              "text": "And so my fellow Americans."
+            },
+            {
+              "audioSeconds": 5,
+              "timesMs": [
+                145.52499985694885,
+                142.7300000190735,
+                142.4649999141693,
+                142.7150001525879,
+                142.47000002861023
+              ],
+              "medianMs": 142.7150001525879,
+              "text": "And so my fellow Americans ask not"
+            },
+            {
+              "audioSeconds": 11,
+              "timesMs": [
+                357.47000002861023,
+                357.585000038147,
+                357.34999990463257,
+                357.59999990463257,
+                392.27500009536743
+              ],
+              "medianMs": 357.585000038147,
+              "text": "And so my fellow Americans ask not what your country can do for you ask what you can do for your country"
+            },
+            {
+              "audioSeconds": 3,
+              "timesMs": [
+                96.53999996185303,
+                93.01999998092651,
+                92.96499991416931,
+                94.69000005722046,
+                92.88000011444092
+              ],
+              "medianMs": 93.01999998092651,
+              "text": "And so my fellow Americans."
+            }
+          ]
+        }
+      ],
+      "heartbeat": {
+        "samples": 545,
+        "maxGapMs": 12.200000047683716,
+        "p95GapMs": 11.014999866485596
+      }
+    },
+    {
+      "requestedThreads": 4,
+      "preloadMs": 264.68499994277954,
+      "hardwareConcurrency": 12,
+      "crossOriginIsolated": true,
+      "direct": [
+        {
+          "id": "tiny",
+          "firstMs": 247.56500005722046,
+          "firstText": "And so my fellow Americans ask not what your country can do for you, ask what you can do for your country.",
+          "device": "CPU (WASM SIMD128 + guarded relaxed FMA, 4 threads)",
+          "clips": [
+            {
+              "audioSeconds": 1,
+              "timesMs": [
+                15.394999980926514,
+                15.335000038146973,
+                15.34000015258789,
+                15.434999942779541,
+                15.259999990463257
+              ],
+              "medianMs": 15.34000015258789,
+              "text": "And so,"
+            },
+            {
+              "audioSeconds": 3,
+              "timesMs": [
+                31.97000002861023,
+                46.15000009536743,
+                37.86500000953674,
+                35.480000019073486,
+                39.019999980926514
+              ],
+              "medianMs": 37.86500000953674,
+              "text": "And so my fellow Americans."
+            },
+            {
+              "audioSeconds": 5,
+              "timesMs": [
+                57.15499997138977,
+                58.40500020980835,
+                58.41499996185303,
+                58.49500012397766,
+                65.67999982833862
+              ],
+              "medianMs": 58.41499996185303,
+              "text": "And so my fellow Americans ask not."
+            },
+            {
+              "audioSeconds": 11,
+              "timesMs": [
+                136.72000002861023,
+                134.0699999332428,
+                134.67499995231628,
+                134.24000000953674,
+                134.3949999809265
+              ],
+              "medianMs": 134.3949999809265,
+              "text": "And so my fellow Americans ask not what your country can do for you, ask what you can do for your country."
+            },
+            {
+              "audioSeconds": 3,
+              "timesMs": [
+                34.38499999046326,
+                34.46000003814697,
+                34.265000104904175,
+                34.1949999332428,
+                34.38000011444092
+              ],
+              "medianMs": 34.38000011444092,
+              "text": "And so my fellow Americans."
+            }
+          ]
+        },
+        {
+          "id": "base",
+          "firstMs": 262.1199998855591,
+          "firstText": "And so my fellow Americans ask not what your country can do for you ask what you can do for your country",
+          "device": "CPU (WASM SIMD128 + guarded relaxed FMA, 4 threads)",
+          "clips": [
+            {
+              "audioSeconds": 1,
+              "timesMs": [
+                31.835000038146973,
+                30.644999980926514,
+                30.625,
+                30.664999961853027,
+                30.59500002861023
+              ],
+              "medianMs": 30.644999980926514,
+              "text": "And so"
+            },
+            {
+              "audioSeconds": 3,
+              "timesMs": [
+                69.59000015258789,
+                69.75499987602234,
+                69.72500014305115,
+                69.64999985694885,
+                69.64000010490417
+              ],
+              "medianMs": 69.64999985694885,
+              "text": "And so my fellow Americans."
+            },
+            {
+              "audioSeconds": 5,
+              "timesMs": [
+                101.2900002002716,
+                100.85999989509583,
+                101.24000000953674,
+                101.23499989509583,
+                101.18500018119812
+              ],
+              "medianMs": 101.23499989509583,
+              "text": "And so my fellow Americans ask not"
+            },
+            {
+              "audioSeconds": 11,
+              "timesMs": [
+                257.7449998855591,
+                257.5350000858307,
+                257.69000005722046,
+                256.6050000190735,
+                257.11500000953674
+              ],
+              "medianMs": 257.5350000858307,
+              "text": "And so my fellow Americans ask not what your country can do for you ask what you can do for your country"
+            },
+            {
+              "audioSeconds": 3,
+              "timesMs": [
+                69.63499999046326,
+                69.52500009536743,
+                69.41999983787537,
+                69.60000014305115,
+                69.5149998664856
+              ],
+              "medianMs": 69.52500009536743,
+              "text": "And so my fellow Americans."
+            }
+          ]
+        }
+      ],
+      "heartbeat": {
+        "samples": 405,
+        "maxGapMs": 12.099999904632568,
+        "p95GapMs": 11.144999980926514
+      }
+    }
+  ],
+  "firstCallCaveat": "preloadMs includes local download/verification and base-model construction. tiny firstMs additionally includes lazy model loading; base firstMs does not. Do not treat firstMs as matched cold-inference timing. All reported warm medians exclude loading."
+}

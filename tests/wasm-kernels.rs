@@ -84,6 +84,94 @@ pub extern "C" fn run_tests() -> u32 {
             }
         }
     }
+    #[cfg(target_feature = "relaxed-simd")]
+    {
+        for limit in [65504.0f32, 511.75] {
+            let check = if limit == 65504.0 {
+                simd::half_bounded
+            } else {
+                simd::q8_half_bounded
+            };
+            assert!(check(&[0.0, -0.0, limit, -limit]));
+            let above = f32::from_bits(limit.to_bits() + 1);
+            for invalid in [above, -above, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                assert!(!check(&[0.0, invalid]));
+                assertions += 1;
+            }
+            assertions += 1;
+        }
+        assert!(!simd::q8_half_bounded(&[512.0, -512.0]));
+        assertions += 1;
+        // Every finite binary16 value has an exact f32 representation. Include both
+        // signs, normal/subnormal values and large products, with no half dependency.
+        let half = |bits: u16| {
+            let e = ((bits >> 10) & 31) as i32;
+            let frac = (bits & 1023) as f32;
+            let value = if e == 0 {
+                frac * (1.0 / 16_777_216.0)
+            } else {
+                (1.0 + frac / 1024.0) * f32::from_bits(((e - 15 + 127) as u32) << 23)
+            };
+            if bits & 32768 != 0 { -value } else { value }
+        };
+        for seed in 0..8 {
+            for k in [0, 1, 3, 7, 32, 127, 416, 832] {
+                let a: Vec<f32> = (0..4 * k)
+                    .map(|i| {
+                        half((((i * 7919 + seed * 313) % 31744) as u16) | (((i & 1) as u16) << 15))
+                    })
+                    .collect();
+                let b: Vec<f32> = (0..16 * k)
+                    .map(|i| {
+                        half(
+                            (((i * 3907 + seed * 727) % 31744) as u16)
+                                | ((((i + 1) & 1) as u16) << 15),
+                        )
+                    })
+                    .collect();
+                let rows = std::array::from_fn(|r| &a[r * k..][..k]);
+                let got = simd::rounded_gemm_tile::<4>(rows, &b, k);
+                for r in 0..4 {
+                    for c in 0..16 {
+                        let want = (0..k).fold(0f32, |sum, i| sum + a[r * k + i] * b[i * 16 + c]);
+                        assert_eq!(got[r][c].to_bits(), want.to_bits());
+                        assertions += 1;
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(target_feature = "relaxed-simd")]
+    {
+        let extremes = [
+            0.0f32,
+            -0.0,
+            1.0 / 16_777_216.0,
+            -1.0 / 16_777_216.0,
+            1.0 / 16384.0,
+            -1.0 / 16384.0,
+            65504.0,
+            -65504.0,
+            1.0,
+            -1.0,
+            1.0009765625,
+        ];
+        for k in [1, 2, 11, 31, 128] {
+            let a: Vec<_> = (0..4 * k).map(|i| extremes[i % extremes.len()]).collect();
+            let b: Vec<_> = (0..16 * k)
+                .map(|i| extremes[(i * 3 + 5) % extremes.len()])
+                .collect();
+            let got =
+                simd::rounded_gemm_tile::<4>(std::array::from_fn(|r| &a[r * k..][..k]), &b, k);
+            for r in 0..4 {
+                for c in 0..16 {
+                    let want = (0..k).fold(0f32, |sum, i| sum + a[r * k + i] * b[i * 16 + c]);
+                    assert_eq!(got[r][c].to_bits(), want.to_bits());
+                    assertions += 1;
+                }
+            }
+        }
+    }
     assertions
 }
 
@@ -96,6 +184,18 @@ pub extern "C" fn reject_invalid(case: u32) {
         2 => simd::q8_rows(&[0; 32], &[], 32, &[0.0; 32], &mut [0.0]),
         3 => simd::q8_rows(&[0; 32], &[1.0], 32, &[0.0; 31], &mut [0.0]),
         4 => simd::q8_rows(&[0; 33], &[1.0; 2], 33, &[0.0; 33], &mut [0.0]),
+        #[cfg(target_feature = "relaxed-simd")]
+        5 => {
+            simd::rounded_gemm_tile::<4>([&[]; 4], &[0.0; 16], 1);
+        }
+        #[cfg(target_feature = "relaxed-simd")]
+        6 => {
+            simd::rounded_gemm_tile::<4>([&[0.0]; 4], &[0.0; 15], 1);
+        }
+        #[cfg(target_feature = "relaxed-simd")]
+        7 => {
+            simd::rounded_gemm_tile::<0>([], &[], 1 << 28);
+        }
         _ => unreachable!(),
     }
 }

@@ -99,10 +99,15 @@ fn install() -> Result<()> {
         "worker.js",
         "worker-entry.js",
         "speechworks.js",
+        "pool-owner.js",
+        "runtime-loader.js",
+        "runtime-config.js",
         "transcript.js",
         "capture-worklet.js",
         "speechworks_web.js",
         "speechworks_web_bg.wasm",
+        "relaxed/speechworks_web.js",
+        "relaxed/speechworks_web_bg.wasm",
     ] {
         if !root.join("dist").join(file).is_file() {
             return Err(format!("missing built artifact {file}; run tools/build-web.sh").into());

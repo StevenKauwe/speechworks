@@ -26,3 +26,12 @@ must review the license of any replacement models they choose.
 
 Other Rust dependencies retain their own licenses as listed in their Cargo
 packages. Cargo.lock records the exact dependency versions used for this build.
+
+## Optional threaded WASM adapter
+
+The optional `wasm-threads` build uses wasm-bindgen-rayon 1.3.0 (Apache-2.0).
+`tools/wasm-rayon-worker.js` adapts its `workerHelpers.no-bundler.js`, copyright
+2022 Google Inc., retaining the upstream notice. Changes use same-origin module
+workers instead of blob workers and add bounded startup/error cleanup. The full
+license is in `licenses/wasm-bindgen-rayon.txt`. This adapter is not used by the
+ordinary non-isolated WASM runtime.

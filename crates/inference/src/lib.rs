@@ -19,6 +19,14 @@ mod whisper {
     pub mod tokenizer;
 }
 
+/// Register the existing global Rayon pool before constructing a model.
+/// The browser adapter calls this after its awaited thread-pool initialization.
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+#[doc(hidden)]
+pub fn register_wasm_thread_pool() {
+    cpu::register_wasm_thread_pool();
+}
+
 pub use error::{Error, Result};
 pub use gpu::{Api, Device, DeviceKind, Kernels};
 use runtime::Target;

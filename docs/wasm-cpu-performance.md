@@ -129,3 +129,8 @@ The benchmark kit retains both runtime bundles, raw per-sample JSON, sampled
 profiles, the native harness/control patch, model/artifact hashes, and all
 Omarchy repetitions. Next investigation: explain Omarchy run-to-run variance
 and profile the remaining GEMM cost. Do not infer those causes from this patch.
+
+## Follow-up
+
+See [further CPU optimization](wasm-cpu-phase2.md) for guarded relaxed SIMD,
+Q8 accumulator changes and the separately optional shared-memory worker path.
