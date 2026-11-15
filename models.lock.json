@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "sampleRate": 16000,
+  "defaults": {"draft": "base", "final": "base"},
+  "models": {
+    "tiny": {
+      "architecture": "moonshine", "license": "MIT",
+      "source": "https://huggingface.co/handy-computer/moonshine-tiny-gguf/resolve/c71a93b8f1cb2b7f7336f31bb54bc96960c16f41/moonshine-tiny-Q8_0.gguf",
+      "sha256": "2fd348d7b38f97d309cc3ec6848f3f57f537b80244950f07d2637e463f95a3a1",
+      "bytes": 35466912
+    },
+    "base": {
+      "architecture": "moonshine", "license": "MIT",
+      "source": "https://huggingface.co/handy-computer/moonshine-base-gguf/resolve/124f8cf8d3c1c56ad0f6ebc44aaafc0622e62d97/moonshine-base-Q8_0.gguf",
+      "sha256": "7f0027dfd857d310b63a85ef57cadf183da712cc374f85a648f8bc18aaa2efc8",
+      "bytes": 77476480
+    }
+  }
+}

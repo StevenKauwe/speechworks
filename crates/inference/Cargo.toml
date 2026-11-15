@@ -1,0 +1,25 @@
+[package]
+name = "speechworks-inference"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Native and browser Rust Moonshine inference with portable WebGPU and CPU recovery"
+repository = "https://github.com/StevenKauwe/speechworks"
+rust-version = "1.99"
+readme = "README.md"
+
+[dependencies]
+bytemuck = "1.25"
+half = "2.7"
+thiserror = "2"
+futures-channel = "0.3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "wgsl", "metal", "vulkan", "dx12"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "wgsl", "webgpu"] }
+
+[dev-dependencies]
+pollster = "1"
+hound = "3.5"

@@ -1,0 +1,28 @@
+# Third-party notices
+
+Speechworks' dictation/session layer, browser integration and asset tooling are
+Copyright (c) 2026 Steven Kaai Kauwe, licensed under MIT (LICENSE).
+
+The inference implementation derives from [wavo](https://github.com/vladkens/wavo),
+revision `06dfe6642db8a2f9159ad0f23719f23276431a84`. Its MIT copyright notices cover
+vladkens, the transcribe.cpp authors, and the ggml authors. Their full license is
+retained in `crates/inference/LICENSE-WAVO` and distributed in `licenses/wavo.txt`.
+Speechworks adds browser-safe asynchronous GPU operations, uniform parameters,
+in-memory model loading, bounded inference, and device-loss CPU recovery.
+
+The GPU portability design follows Steven Kauwe's BSD-3-Clause tabicl-anywhere;
+the speech kernels are derived from wavo, not the TabICL model.
+
+Silero VAD inference derives from `silero-vad-pure` 0.1.1, MIT, maintained here
+as `speechworks-vad`. It retains the previous 64 samples (32 at 8 kHz) required
+by the official streaming wrapper, and removes the optional Accelerate dependency.
+Original notices and model provenance are retained in `crates/vad`.
+The embedded Silero v6.2 model is MIT, from Silero Team.
+Moonshine tiny/base model weights are MIT, from Useful Sensors; the default
+manifest pins handy-computer's GGUF conversions by immutable revision, byte
+length and SHA-256. Model files are downloaded at build/install time and served
+by the consuming application. Code and model licenses are separate; applications
+must review the license of any replacement models they choose.
+
+Other Rust dependencies retain their own licenses as listed in their Cargo
+packages. Cargo.lock records the exact dependency versions used for this build.

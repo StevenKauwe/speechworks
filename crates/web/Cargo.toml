@@ -1,0 +1,19 @@
+[package]
+name = "speechworks-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WebAssembly bindings for Speechworks dictation and inference"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+speechworks = { path = "../speechworks" }
+speechworks-inference = { path = "../inference" }
+speechworks-vad = { path = "../vad" }
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "=0.4.79"
+serde-wasm-bindgen = "0.6"
+js-sys = "=0.3.106"

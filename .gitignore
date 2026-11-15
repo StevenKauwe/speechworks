@@ -1,0 +1,7 @@
+/target/
+/dist/
+/models/
+/test-results/
+/node_modules/
+*.tmp
+.DS_Store

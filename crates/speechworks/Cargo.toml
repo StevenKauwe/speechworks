@@ -1,0 +1,11 @@
+[package]
+name = "speechworks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Configurable, bounded dictation sessions for native Rust and WebAssembly"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"

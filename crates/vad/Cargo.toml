@@ -1,0 +1,14 @@
+[package]
+name = "speechworks-vad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure Rust streaming Silero voice activity detection with retained audio context"
+
+[features]
+default = []
+profile = []
+
+[dependencies]
+matrixmultiply = "0.3"

@@ -1,0 +1,1543 @@
+// Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo
+//! wgpu device, weight upload, and a recorder that encodes kernel dispatches into compute passes.
+//! Parameters use ordinary uniform buffers and readback yields to the browser event loop.
+//! This port uses the same portable WGSL kernels on native GPU drivers and WebGPU.
+
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+
+use wgpu::BindGroup;
+pub use wgpu::Buffer;
+
+use crate::error::{Error, Result, bail};
+use crate::gguf::{Tensor, Type};
+
+type Pipeline = wgpu::ComputePipeline;
+
+/// Bind groups cached per dispatch, each with the pipeline and buffers it was made for.
+pub type Groups = Vec<(Pipeline, Vec<Buffer>, BindGroup, Buffer, BindGroup)>;
+
+/// Submissions a call may make (slots in `Gpu::marks`).
+const MARKS: u64 = 256;
+
+/// The backend actually selected by [`crate::Model`]. Report this in diagnostics instead of
+/// assuming that GPU inference was available. Browser adapter names may be anonymized.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct Device {
+    pub name: String,
+    pub api: Api,
+    pub kind: DeviceKind,
+    pub driver: String,
+    pub kernels: Kernels,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Api {
+    Metal,
+    Vulkan,
+    Dx12,
+    WebGpu,
+    Cpu,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DeviceKind {
+    DiscreteGpu,
+    IntegratedGpu,
+    SoftwareGpu,
+    OtherGpu,
+    Cpu,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Kernels {
+    Portable,
+    Cpu,
+}
+
+impl Device {
+    /// The warning for a GPU emulated on the CPU, the one wavo's CLI prints; `None` for a real GPU.
+    pub fn warning(&self) -> Option<String> {
+        let fix = if cfg!(windows) {
+            "install the GPU's driver"
+        } else {
+            "install the GPU's Vulkan driver"
+        };
+        let msg = "is a software GPU, emulated on the CPU: expect 10-50x slower transcription";
+        (self.kind == DeviceKind::SoftwareGpu).then(|| format!("{} {msg}; {fix}", self.name))
+    }
+
+    /// The device of an adapter from `adapter()` or `devices()`.
+    fn new(info: &wgpu::AdapterInfo, kernels: Kernels) -> Self {
+        let api = match info.backend {
+            wgpu::Backend::Metal => Api::Metal,
+            wgpu::Backend::Vulkan => Api::Vulkan,
+            wgpu::Backend::Dx12 => Api::Dx12,
+            _ => Api::WebGpu,
+        };
+        let kind = match info.device_type {
+            wgpu::DeviceType::DiscreteGpu => DeviceKind::DiscreteGpu,
+            wgpu::DeviceType::IntegratedGpu => DeviceKind::IntegratedGpu,
+            wgpu::DeviceType::Cpu => DeviceKind::SoftwareGpu,
+            wgpu::DeviceType::VirtualGpu | wgpu::DeviceType::Other => DeviceKind::OtherGpu,
+        };
+        let driver = [info.driver.trim(), info.driver_info.trim()];
+        let driver = driver
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Self {
+            // Browsers may omit the adapter name for privacy. Keep diagnostics readable.
+            name: if info.name.trim().is_empty() {
+                "GPU".into()
+            } else {
+                info.name.clone()
+            },
+            api,
+            kind,
+            driver,
+            kernels,
+        }
+    }
+}
+
+impl std::fmt::Display for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let api = match self.api {
+            Api::Metal => "Metal",
+            Api::Vulkan => "Vulkan",
+            Api::Dx12 => "DX12",
+            Api::WebGpu => "WebGPU",
+            Api::Cpu => return write!(f, "{} ({})", self.name, self.driver),
+        };
+        let kind = match self.kind {
+            DeviceKind::DiscreteGpu => "discrete",
+            DeviceKind::IntegratedGpu => "integrated",
+            DeviceKind::SoftwareGpu => "software",
+            DeviceKind::OtherGpu => "other",
+            DeviceKind::Cpu => {
+                return write!(f, "{} ({api})", self.name);
+            }
+        };
+        write!(f, "{} ({api}, {kind})", self.name)
+    }
+}
+
+pub struct Gpu {
+    /// What `Model::device` reports.
+    info: Device,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    /// Usage of weight buffers. On unified memory they are also `MAP_WRITE`, so filling their
+    /// mapping writes the buffer itself: no staging copy. Else `COPY_DST`, for those copies.
+    weights: wgpu::BufferUsages,
+    kernels: Portable,
+    fast: Fast,
+    /// Bound for a writable output a dispatch doesn't use, so no writable binding aliases another.
+    spare: Buffer,
+    /// One slot per submission of a call, set to the call's number when its work is done. A driver
+    /// may cancel a long submission and report success (i915 does after 20 s), which would read
+    /// back the previous call's output; a slot without the number makes the call an error instead.
+    marks: Buffer,
+    marks_read: Buffer,
+    /// The last call's number.
+    calls: AtomicU32,
+    /// Bytes of weights staged since the last submission (see `Gpu::filled`).
+    pending: AtomicU64,
+    /// Held from a call's first submission to its readback: calls share `marks`.
+    busy: Mutex<()>,
+    /// The first device-lost or uncaptured wgpu error, reported by the next call.
+    failure: Arc<Mutex<Option<String>>>,
+    /// The tensor GEMM's input as f16, grown to the largest so far (bind groups keep older ones).
+    halves: Mutex<Option<Buffer>>,
+}
+
+/// The portable kernels, which every adapter runs; `Fast` replaces some of them.
+struct Portable {
+    /// One per weight type.
+    gemm: Vec<Pipeline>,
+    /// Columns and rows of the GEMM's tile: 128 × 32 on the 16×16 tier, whose GEMMs that come here
+    /// are too small for its tiles and run faster with more workgroups, 64 × 64 on a CPU adapter
+    /// (`gemm_cpu.wgsl`), else 128 × 64.
+    gemm_tile: [usize; 2],
+    layer_norm: Pipeline,
+    im2col: Pipeline,
+    conv_glu: Pipeline,
+    flash: Pipeline,
+    relative: Pipeline,
+    scores: Pipeline,
+    softmax: Pipeline,
+    values: Pipeline,
+    depthwise: Pipeline,
+    first_depthwise: Pipeline,
+    flatten: Pipeline,
+    rope: Pipeline,
+    group_norm: Pipeline,
+    swiglu: Pipeline,
+    argmax: Pipeline,
+    mark: Pipeline,
+    gemm_module: wgpu::ShaderModule,
+    /// Compiled on first use: only encoder–decoder models need them.
+    decoder: OnceLock<Decoder>,
+}
+
+impl Portable {
+    fn new(device: &wgpu::Device, gemm_tile: [usize; 2]) -> Self {
+        let cpu = gemm_tile[0] == 64;
+        let gemm = match cpu {
+            true => module(
+                device,
+                &[include_str!("gemm.wgsl"), include_str!("gemm_cpu.wgsl")].concat(),
+            ),
+            false => module(device, include_str!("gemm.wgsl")),
+        };
+        let ops = module(device, include_str!("ops.wgsl"));
+        let attention = module(device, include_str!("attention.wgsl"));
+        let spatial = module(device, include_str!("spatial.wgsl"));
+        Self {
+            gemm: (0..3)
+                .map(|ty| match cpu {
+                    true => pipeline(device, &gemm, "gemm64", &[("WTYPE", ty as f64)]),
+                    false => {
+                        let constants = [("WTYPE", ty as f64), ("ROWS", gemm_tile[1] as f64)];
+                        pipeline(device, &gemm, "gemm", &constants)
+                    }
+                })
+                .collect(),
+            gemm_tile,
+            layer_norm: pipeline(device, &ops, "layer_norm", &[]),
+            im2col: pipeline(device, &ops, "im2col", &[]),
+            conv_glu: pipeline(device, &ops, "conv_glu", &[]),
+            flash: pipeline(device, &attention, "flash", &[]),
+            relative: pipeline(device, &attention, "relative", &[]),
+            scores: pipeline(device, &attention, "scores", &[]),
+            softmax: pipeline(device, &ops, "softmax", &[]),
+            values: pipeline(device, &attention, "values", &[]),
+            depthwise: pipeline(device, &spatial, "depthwise", &[]),
+            first_depthwise: pipeline(device, &spatial, "first_depthwise", &[]),
+            flatten: pipeline(device, &spatial, "flatten", &[]),
+            rope: pipeline(device, &ops, "rotary", &[]),
+            group_norm: pipeline(device, &ops, "group_norm", &[]),
+            swiglu: pipeline(device, &ops, "swiglu", &[]),
+            argmax: pipeline(device, &ops, "argmax", &[]),
+            mark: pipeline(device, &ops, "mark", &[]),
+            gemm_module: gemm,
+            decoder: OnceLock::new(),
+        }
+    }
+}
+
+/// Kernels for one decoder token: `gemv` and `embed` per weight type, `attend`, `combine`, `pack`
+/// and, with the fast tier, a LayerNorm of one row. With the fast tier their reductions are
+/// subgroup.wgsl's.
+struct Decoder {
+    layer_norm: Option<Pipeline>,
+    gemv: Vec<Pipeline>,
+    embed: Vec<Pipeline>,
+    attend: Pipeline,
+    combine: Pipeline,
+    pack: Pipeline,
+}
+
+#[derive(Default)]
+struct Fast {
+    /// F of the GEMM's F×F cooperative matrices: 8 (Apple) or 16; 0 without the fast GEMM.
+    size: usize,
+    gemm: Option<Vec<Pipeline>>,
+    layer_norm: Option<Pipeline>,
+    conv_glu: Option<Pipeline>,
+    /// Flash attention: `flash.wgsl` (F = 8, head_dim 32..64) or `flash_f16.wgsl` (F = 16,
+    /// head_dim ≤ 64), both in steps of 4.
+    attention: Option<Pipeline>,
+    /// F of the kept flash attention, independent of the GEMM's probe; 0 without it.
+    attention_size: usize,
+    /// Flash attention with relative positions for head_dim ≤ 128.
+    relative: Option<Pipeline>,
+    /// The GEMM on the Metal 4 tensor API, in place of the 8×8 one at any size.
+    tensor: Option<TensorGemm>,
+}
+
+/// `gemm_tensor.metal`: `cast` and per weight type the GEMM.
+struct TensorGemm {
+    cast: Pipeline,
+    gemm: Vec<Pipeline>,
+}
+
+/// A linear layer `y = x·Wᵀ + b` with `W` row-major `[n][k]`, kept in its GGUF type. Q8_0 is
+/// stored as int8 data (4 per u32, row-major) plus one f16 scale per 32-weight block.
+pub struct Linear {
+    /// Rows of `W`, padded to a multiple of 64 for the tile reads.
+    n: usize,
+    /// Output columns: the rows of `W` when a multiple of 32, else `n`.
+    cols: usize,
+    k: usize,
+    /// Outputs written a second time after the `cols` others, with their own bias.
+    dual: usize,
+    /// GEMM pipeline index: 0: F32, 1: F16, 2: Q8_0
+    ty: usize,
+    weight: Buffer,
+    scales: Option<Buffer>,
+    bias: Buffer,
+}
+
+impl Linear {
+    /// Output columns: the rows of `W` (padded to a multiple of 64 unless a multiple of 32), and
+    /// the dual outputs.
+    pub fn width(&self) -> usize {
+        self.cols + self.dual
+    }
+}
+
+/// Per-channel weights and biases: a LayerNorm's gain and bias, a per-channel affine `x·w + b`, or
+/// a depthwise conv's taps and bias.
+pub struct Channels {
+    w: Buffer,
+    b: Buffer,
+}
+
+/// The norm after the Conformer conv module's depthwise conv.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ConvNorm {
+    LayerNorm,
+    /// `x·g + b`: BatchNorm folded at load.
+    Affine,
+}
+
+#[derive(Clone, Copy)]
+pub enum Epilogue {
+    Bias,
+    Silu,
+    Relu,
+    /// `c += alpha · (a·Wᵀ + b)`
+    Residual(f32),
+    Gelu,
+    /// `c += GELU(a·Wᵀ + b)`
+    GeluResidual,
+    Tanh,
+}
+
+impl Epilogue {
+    /// The kernels' mode and alpha.
+    fn params(self) -> [u32; 2] {
+        match self {
+            Epilogue::Bias => [0, 0],
+            Epilogue::Silu => [1, 0],
+            Epilogue::Relu => [2, 0],
+            Epilogue::Residual(alpha) => [3, alpha.to_bits()],
+            Epilogue::Gelu => [4, 0],
+            Epilogue::GeluResidual => [5, 0],
+            Epilogue::Tanh => [6, 0],
+        }
+    }
+}
+
+impl Gpu {
+    /// The device on the adapter at `index` of [`devices`] (by default the one `adapter()` picks),
+    /// with the fast kernels that pass their probes, or only the portable ones.
+    pub async fn new() -> Result<Self> {
+        let desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        let instance = wgpu::Instance::new(desc);
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                ..Default::default()
+            })
+            .await?;
+        if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
+            return Err(Error::Gpu("software GPU; use the Rust CPU backend".into()));
+        }
+        let info = Device::new(&adapter.get_info(), Kernels::Portable);
+        let supported = adapter.limits();
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits {
+                    max_buffer_size: supported.max_buffer_size,
+                    max_storage_buffer_binding_size: supported.max_storage_buffer_binding_size,
+                    max_compute_workgroup_storage_size: supported
+                        .max_compute_workgroup_storage_size,
+                    ..Default::default()
+                },
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                ..Default::default()
+            })
+            .await?;
+        let failure = Arc::new(Mutex::new(None));
+        let f = failure.clone();
+        device.on_uncaptured_error(Arc::new(move |e| fail(&f, e.to_string())));
+        let f = failure.clone();
+        device.set_device_lost_callback(move |_, message| {
+            fail(&f, format!("device lost: {message}"))
+        });
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let kernels = Portable::new(&device, [128, 32]);
+        if let Some(error) = scope.pop().await {
+            return Err(Error::Gpu(error.to_string()));
+        }
+        let weights = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+        let buffer = |size, usage| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
+        let spare = buffer(4, wgpu::BufferUsages::STORAGE);
+        let marks = buffer(
+            MARKS * 4,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
+        let marks_read = buffer(
+            MARKS * 4,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        Ok(Self {
+            info,
+            device,
+            queue,
+            weights,
+            kernels,
+            fast: Fast::default(),
+            spare,
+            marks,
+            marks_read,
+            calls: AtomicU32::new(0),
+            pending: AtomicU64::new(0),
+            busy: Mutex::new(()),
+            failure,
+            halves: Mutex::new(None),
+        })
+    }
+
+    /// Fail before allocating or recording against a lost device.
+    pub fn check(&self) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.device.poll(wgpu::PollType::Poll)?;
+        if let Some(error) = self
+            .failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        {
+            return Err(Error::Gpu(error));
+        }
+        Ok(())
+    }
+
+    /// The adapter this runs on.
+    pub fn info(&self) -> &Device {
+        &self.info
+    }
+
+    /// Whether the tensor GEMM computes a small product right, over two tiles of rows: c[r][j] =
+    /// j % 32 + r % 32, with a[r][x] = x + r % 32 and W[j][x] = 1 where x = j % 32, else 0.
+
+    /// A buffer of at least `len` f16s for the tensor GEMM's input.
+    fn halves(&self, len: usize) -> Buffer {
+        let mut halves = self.halves.lock().unwrap_or_else(PoisonError::into_inner);
+        if halves.as_ref().is_none_or(|h| h.size() < 2 * len as u64) {
+            *halves = Some(self.buffer(len.div_ceil(2)));
+        }
+        halves.clone().unwrap()
+    }
+
+    /// Keeps each fast kernel whose probe reports its subgroup layout. With all params zero a
+    /// kernel sees an empty problem and writes its layout, `subgroups` of 32 lanes, to its output.
+    /// The probes run in one submission; a device error turns them all off.
+
+    /// An uninitialized storage buffer of `len` f32s.
+    pub fn buffer(&self, len: usize) -> Buffer {
+        self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (len.max(1) * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// A buffer the CPU reads results back from.
+    pub fn readback(&self, len: usize) -> Buffer {
+        self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (len.max(1) * 4) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// A weight buffer of `size` bytes whose first `len` the caller writes through `Fill::slice`,
+    /// then hands to `filled`; the rest stays zero.
+    fn fill(&self, size: usize, len: usize) -> Result<Fill> {
+        let staged = !self.weights.contains(wgpu::BufferUsages::MAP_WRITE);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: size.max(4).next_multiple_of(4) as u64,
+            usage: self.weights,
+            mapped_at_creation: !staged,
+        });
+        if !staged {
+            let view = View::Mapped(buffer.get_mapped_range_mut(..)?);
+            return Ok(Fill { buffer, view });
+        }
+        // A copy is 4-byte aligned: the bytes past `len` up to that are zeros.
+        let aligned = len.max(1).next_multiple_of(4);
+        let size = wgpu::BufferSize::new(aligned as u64).unwrap();
+        let mut view = (self.queue.write_buffer_with(&buffer, 0, size)).ok_or_else(|| {
+            Error::Gpu(format!(
+                "staging {aligned} bytes for a weight buffer failed"
+            ))
+        })?;
+        view.slice(len..).copy_from_slice(&[0; 3][..aligned - len]);
+        Ok(Fill {
+            buffer,
+            view: View::Staged(view),
+        })
+    }
+
+    /// The buffer of a `fill` once written. Without unified memory wgpu copies the staging buffer
+    /// into it with the next submission, so every 16 MB of them are submitted right away: the
+    /// copies run while the rest of the model loads, and at most the last 16 MB in the first call.
+    fn filled(&self, f: Fill) -> Buffer {
+        let Fill { buffer, view } = f;
+        match view {
+            View::Mapped(view) => {
+                drop(view);
+                buffer.unmap();
+            }
+            View::Staged(view) => {
+                let len = view.len() as u64;
+                drop(view);
+                if self.pending.fetch_add(len, Ordering::Relaxed) + len >= 16 << 20 {
+                    self.pending.store(0, Ordering::Relaxed);
+                    self.queue.submit([]);
+                }
+            }
+        }
+        buffer
+    }
+
+    pub fn upload(&self, data: &[f32]) -> Result<Buffer> {
+        let bytes: &[u8] = bytemuck::cast_slice(data);
+        let mut f = self.fill(bytes.len(), bytes.len())?;
+        f.slice(0..bytes.len()).copy_from_slice(bytes);
+        Ok(self.filled(f))
+    }
+
+    pub fn write(&self, buffer: &Buffer, data: &[f32]) {
+        self.queue
+            .write_buffer(buffer, 0, bytemuck::cast_slice(data));
+    }
+
+    /// Uploads weights `[.., n_i]` of one type and inner size, stacked along n, with the bias of
+    /// the stacked rows, or zeros when `bias` is empty. The GEMM computes 64 outputs at a time, so
+    /// the rows are padded with zeros to a multiple of 64. Outputs past the rows are not written
+    /// when the rows are a multiple of 32 (d 288), else they are `epilogue(0)` up to the padding. A
+    /// bias with `dual` more values has the first `dual` outputs written again after the others
+    /// with those biases (one q with two position biases).
+    pub fn linear(&self, weights: &[Tensor], bias: &[f32]) -> Result<Linear> {
+        self.upload_linear(weights, bias, false)
+    }
+
+    /// A conv1d weight `[kernel, ch, out]` as a linear layer over the columns of `Pass::im2col`,
+    /// whose rows are padded with zeros to a multiple of 32, the GEMM's k step. W's rows get the
+    /// same zero columns (an 80-mel conv: 240 → 256) in F32, which is exact as the GEMM rounds W to
+    /// f16 either way.
+    pub fn conv(&self, weight: Tensor, bias: &[f32]) -> Result<Linear> {
+        self.upload_linear(&[weight], bias, true)
+    }
+
+    fn upload_linear(&self, weights: &[Tensor], bias: &[f32], pad: bool) -> Result<Linear> {
+        let w0 = &weights[0];
+        let k = w0.len() / w0.dims.last().unwrap();
+        let rows = weights
+            .iter()
+            .map(|w| w.dims.last().unwrap())
+            .sum::<usize>();
+        if weights
+            .iter()
+            .any(|w| w.ty != w0.ty || w.len() / w.dims.last().unwrap() != k)
+        {
+            bail!("stacked weights differ in type or shape");
+        }
+        if !pad && !k.is_multiple_of(32) {
+            bail!("linear layer {k}→{rows}: needs k % 32 == 0");
+        }
+        // Buffers start zeroed, so the padding rows are only left unwritten.
+        let n = rows.next_multiple_of(64);
+        let cols = if rows.is_multiple_of(32) { rows } else { n };
+        let kp = k.next_multiple_of(32);
+        // The file is streamed in pieces of 8192 Q8_0 blocks straight into the mapped buffers.
+        const PIECE: usize = 34 << 13;
+        let (ty, weight, scales) = match w0.ty {
+            _ if kp != k => {
+                let mut padded = vec![0f32; rows * kp];
+                let w = weights
+                    .iter()
+                    .map(|w| w.to_f32())
+                    .collect::<Result<Vec<_>>>()?;
+                for (row, w) in padded
+                    .chunks_mut(kp)
+                    .zip(w.iter().flat_map(|w| w.chunks(k)))
+                {
+                    row[..k].copy_from_slice(w);
+                }
+                let mut f = self.fill(n * kp * 4, rows * kp * 4)?;
+                f.slice(0..rows * kp * 4)
+                    .copy_from_slice(bytemuck::cast_slice(&padded));
+                (0, self.filled(f), None)
+            }
+            Type::F32 | Type::F16 => {
+                let (ty, width) = if w0.ty == Type::F32 { (0, 4) } else { (1, 2) };
+                let mut f = self.fill(n * k * width, rows * k * width)?;
+                let mut at = 0;
+                for w in weights {
+                    w.read(PIECE, |i, piece| {
+                        f.slice(at + i..at + i + piece.len()).copy_from_slice(piece)
+                    })?;
+                    at += w.len() * width;
+                }
+                (ty, self.filled(f), None)
+            }
+            Type::Q8_0 => {
+                let (mut dv, mut sv) = (
+                    self.fill(n * k, rows * k)?,
+                    self.fill(n * k / 16, rows * k / 16)?,
+                );
+                let mut block = 0;
+                for w in weights {
+                    w.read(PIECE, |i, piece| {
+                        // Each block's scale and data go straight into the mappings.
+                        let blocks = piece.as_chunks::<34>().0;
+                        let (a, b) = (block + i / 34, block + i / 34 + blocks.len());
+                        let d = dv.slice(a * 32..b * 32).into_chunks::<32>().0;
+                        d.write_iter(
+                            blocks
+                                .iter()
+                                .map(|q| <[u8; 32]>::try_from(&q[2..]).unwrap()),
+                        );
+                        let s = sv.slice(a * 2..b * 2).into_chunks::<2>().0;
+                        s.write_iter(blocks.iter().map(|q| [q[0], q[1]]));
+                    })?;
+                    block += w.len() / 32;
+                }
+                (2, self.filled(dv), Some(self.filled(sv)))
+            }
+        };
+        let dual = bias.len().saturating_sub(rows);
+        if !bias.is_empty() && bias.len() < rows || dual > rows {
+            bail!("linear layer {k}→{rows}: bias has {} values", bias.len());
+        }
+        let (own, second) = bias.split_at(bias.len() - dual);
+        let mut padded = vec![0.0; n.max(cols + dual)];
+        padded[..own.len()].copy_from_slice(own);
+        padded[cols..cols + dual].copy_from_slice(second);
+        Ok(Linear {
+            n,
+            cols,
+            k: kp,
+            dual,
+            ty,
+            weight,
+            scales,
+            bias: self.upload(&padded)?,
+        })
+    }
+
+    pub fn channels(&self, w: &[f32], b: &[f32]) -> Result<Channels> {
+        Ok(Channels {
+            w: self.upload(w)?,
+            b: self.upload(b)?,
+        })
+    }
+
+    fn decoder(&self) -> &Decoder {
+        self.kernels.decoder.get_or_init(|| {
+            let device = &self.device;
+            let fast = self.fast.size != 0;
+            let source = |s: &str| {
+                if fast {
+                    swap_fns(s, include_str!("subgroup.wgsl"))
+                } else {
+                    s.into()
+                }
+            };
+            let gemm = match fast {
+                true => &module(device, &source(include_str!("gemm.wgsl"))),
+                false => &self.kernels.gemm_module,
+            };
+            let decode = module(device, &source(include_str!("decode.wgsl")));
+            let ops = fast.then(|| module(device, &source(include_str!("ops.wgsl"))));
+            Decoder {
+                layer_norm: ops.map(|ops| pipeline(device, &ops, "layer_norm", &[])),
+                gemv: gemms(device, gemm, "gemv"),
+                embed: gemms(device, gemm, "embed"),
+                attend: pipeline(device, &decode, "attend", &[]),
+                combine: pipeline(device, &decode, "combine", &[]),
+                pack: pipeline(device, &decode, "pack", &[]),
+            }
+        })
+    }
+
+    /// The rows of the fast GEMM's tile for `m` rows of `n` outputs, or `None` for the portable GEMM.
+    fn tile_rows(&self, n: usize, m: usize) -> Option<usize> {
+        self.fast.gemm.as_ref()?;
+        let short = 4 * self.fast.size;
+        let (cols, m8, m4) = (
+            n.div_ceil(2 * short),
+            m.div_ceil(2 * short),
+            m.div_ceil(short),
+        );
+        // Tiles 128 wide (F = 16) in fewer than 16 workgroups ran slower than the portable 64×64 ones
+        // on an RTX 4060: GigaAM's 768-wide layers at 113 rows, 12 workgroups, by 1.5×.
+        if short == 64 && cols * m4 < 16 {
+            return None;
+        }
+        // 8F-row tiles unless they leave few workgroups or pad more rows than 4F-row ones.
+        Some(if m8 * cols >= 64 && m8 * 20 <= m4 * 11 {
+            2 * short
+        } else {
+            short
+        })
+    }
+
+    fn flash(&self, head_dim: usize, relative: bool) -> Option<&Pipeline> {
+        let (k, min, max, step) = match (relative, self.fast.attention_size) {
+            (true, _) => (&self.fast.relative, 8, 128, 8),
+            (false, 8) => (&self.fast.attention, 32, 64, 4),
+            (false, _) => (&self.fast.attention, 4, 64, 4),
+        };
+        k.as_ref()
+            .filter(|_| (min..=max).contains(&head_dim) && head_dim.is_multiple_of(step))
+    }
+
+    /// Whether the portable path has a flash kernel for heads of `head_dim`.
+    fn portable_flash(head_dim: usize, relative: bool) -> bool {
+        head_dim <= if relative { 128 } else { 64 } && head_dim.is_multiple_of(4)
+    }
+
+    /// Floats of attention scratch for `t` frames: the portable path without flash attention keeps
+    /// all scores.
+    pub fn scores_len(&self, t: usize, heads: usize, head_dim: usize, relative: bool) -> usize {
+        match self.flash(head_dim, relative).is_some() || Self::portable_flash(head_dim, relative) {
+            true => 1,
+            false => heads * t * t,
+        }
+    }
+
+    fn begin(&self) -> (wgpu::CommandEncoder, wgpu::ComputePass<'static>) {
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let pass = encoder
+            .begin_compute_pass(&Default::default())
+            .forget_lifetime();
+        (encoder, pass)
+    }
+
+    /// Records the dispatches of `record` (one submission, or more with `Pass::layers`), runs them,
+    /// and reads back `len` f32s of `out` through the `read` buffer. `groups` caches bind groups by
+    /// dispatch index, so a caller must record the same dispatch sequence over the same buffers each
+    /// time, and clear it when buffers change.
+    pub async fn run(
+        &self,
+        groups: &mut Groups,
+        out: &Buffer,
+        read: &Buffer,
+        len: usize,
+        record: impl FnOnce(&mut Pass),
+    ) -> Result<Vec<f32>> {
+        self.check()?;
+        let busy = self.busy()?;
+        let r = self.record_call(groups, out, read, len, record);
+        self.complete(busy, r, read, || ()).await
+    }
+
+    /// `run` in two halves, so the CPU can record the next call while the GPU runs this one: records
+    /// a call, which must not use `Pass::layers`, for `finish`.
+    pub fn record(
+        &self,
+        groups: &mut Groups,
+        out: &Buffer,
+        read: &Buffer,
+        len: usize,
+        record: impl FnOnce(&mut Pass),
+    ) -> Recorded {
+        self.record_call(groups, out, read, len, |p| {
+            record(p);
+            assert!(
+                p.queued.is_none(),
+                "Gpu::record of a call with Pass::layers"
+            );
+        })
+    }
+
+    /// Submits a call from `record`, runs `meanwhile` while the GPU works, then waits for it and
+    /// returns its output, read through `read` (the buffer given to `record`).
+    pub async fn finish(
+        &self,
+        r: Recorded,
+        read: &Buffer,
+        meanwhile: impl FnOnce(),
+    ) -> Result<Vec<f32>> {
+        self.complete(self.busy()?, r, read, meanwhile).await
+    }
+
+    fn busy(&self) -> Result<MutexGuard<'_, ()>> {
+        self.busy.try_lock().map_err(|_| Error::Busy)
+    }
+
+    fn record_call(
+        &self,
+        groups: &mut Groups,
+        out: &Buffer,
+        read: &Buffer,
+        len: usize,
+        record: impl FnOnce(&mut Pass),
+    ) -> Recorded {
+        let call = self.calls.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        let mut p = Pass::new(self, groups, call);
+        record(&mut p);
+        p.mark(out);
+        let Pass {
+            mut encoder,
+            pass,
+            marked,
+            ..
+        } = p;
+        drop(pass);
+        let (size, marks) = ((len * 4) as u64, marked as u64 * 4);
+        encoder.copy_buffer_to_buffer(out, 0, read, 0, size);
+        encoder.copy_buffer_to_buffer(&self.marks, 0, &self.marks_read, 0, marks);
+        Recorded {
+            commands: encoder.finish(),
+            call,
+            size,
+            marks,
+        }
+    }
+
+    async fn complete(
+        &self,
+        _busy: MutexGuard<'_, ()>,
+        r: Recorded,
+        read: &Buffer,
+        meanwhile: impl FnOnce(),
+    ) -> Result<Vec<f32>> {
+        let Recorded {
+            commands,
+            call,
+            size,
+            marks,
+        } = r;
+        self.queue.submit([commands]);
+        meanwhile();
+
+        let slices = [read.slice(..size), self.marks_read.slice(..marks)];
+        let mut pending = Vec::new();
+        for slice in &slices {
+            let (tx, rx) = futures_channel::oneshot::channel();
+            slice.map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            pending.push(rx);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.device.poll(wgpu::PollType::wait_indefinitely())?;
+        for rx in pending {
+            rx.await
+                .map_err(|_| Error::Gpu("readback callback cancelled".into()))??;
+        }
+        let data = bytemuck::cast_slice(&slices[0].get_mapped_range()?).to_vec();
+        let done = bytemuck::cast_slice::<_, u32>(&slices[1].get_mapped_range()?)
+            .iter()
+            .all(|&m| m == call);
+        read.unmap();
+        self.marks_read.unmap();
+        if let Some(failure) = self
+            .failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        {
+            return Err(Error::Gpu(failure));
+        }
+        if !done {
+            return Err(Error::Gpu(
+                "the driver did not finish the work (cancelled as too long?)".into(),
+            ));
+        }
+        Ok(data)
+    }
+}
+
+/// A call recorded by `Gpu::record`, to run with `Gpu::finish`.
+pub struct Recorded {
+    commands: wgpu::CommandBuffer,
+    call: u32,
+    /// Bytes to read back: the output and the marks.
+    size: u64,
+    marks: u64,
+}
+
+/// A weight buffer being written (see `Gpu::fill`).
+struct Fill {
+    buffer: Buffer,
+    view: View,
+}
+
+/// The buffer's own mapping on unified memory, else a staging buffer for wgpu to copy from. That
+/// one isn't zeroed before it is written, unlike the staging buffer of one mapped at creation.
+enum View {
+    Mapped(wgpu::BufferViewMut),
+    Staged(wgpu::QueueWriteBufferView),
+}
+
+impl Fill {
+    fn slice(&mut self, range: std::ops::Range<usize>) -> wgpu::WriteOnly<'_, [u8]> {
+        match &mut self.view {
+            View::Mapped(v) => v.slice(range),
+            View::Staged(v) => v.slice(range),
+        }
+    }
+}
+
+/// `source` with each function of `fns` (WGSL) in place of the function of the same name.
+fn swap_fns(source: &str, fns: &str) -> String {
+    let mut out = source.to_string();
+    for f in fns.split("\nfn ").skip(1) {
+        let name = &f[..f.find('(').unwrap()];
+        let Some(start) = out.find(&format!("\nfn {name}(")) else {
+            continue;
+        };
+        let end = start + out[start..].find("\n}").unwrap() + 2;
+        out.replace_range(
+            start..end,
+            &format!("\nfn {}", &f[..f.find("\n}").unwrap() + 2]),
+        );
+    }
+    out
+}
+
+fn fail(failure: &Mutex<Option<String>>, message: String) {
+    failure
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get_or_insert(message);
+}
+
+/// Keys per workgroup of `Pass::attend`.
+const ATTEND_KEYS: usize = 256;
+
+/// Floats of `Pass::attend`'s scratch for up to `n` keys.
+pub fn attend_len(n: usize, heads: usize, head_dim: usize) -> usize {
+    n.div_ceil(ATTEND_KEYS) * heads * (head_dim + 2)
+}
+
+/// Rows of projected positions for relative attention over `t` frames: positions t + 15 down to
+/// 1 − t. The first 16 are only read by the fast kernel's partial tiles, as are 64 more rows past
+/// the end, which a buffer must have (finite) too.
+pub fn pos_rows(t: usize) -> usize {
+    2 * t + 15
+}
+
+/// Output length of a stride-2 conv with kernel 3 and padding 1 (or kernel 5 and padding 2).
+pub const fn half(n: usize) -> usize {
+    (n - 1) / 2 + 1
+}
+
+fn module(device: &wgpu::Device, source: &str) -> wgpu::ShaderModule {
+    let desc = wgpu::ShaderModuleDescriptor {
+        label: None,
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    };
+    // SAFETY: the bundled kernels only index inside the buffers their callers size for them.
+    device.create_shader_module(desc)
+}
+
+fn pipeline(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    entry: &str,
+    constants: &[(&str, f64)],
+) -> Pipeline {
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(entry),
+        layout: None,
+        module,
+        entry_point: Some(entry),
+        compilation_options: wgpu::PipelineCompilationOptions {
+            constants,
+            zero_initialize_workgroup_memory: false,
+        },
+        cache: None,
+    })
+}
+
+/// The `entry` specialized for each weight type.
+fn gemms(device: &wgpu::Device, module: &wgpu::ShaderModule, entry: &str) -> Vec<Pipeline> {
+    (0..3)
+        .map(|ty| pipeline(device, module, entry, &[("WTYPE", ty as f64)]))
+        .collect()
+}
+
+/// Records kernel dispatches into a compute pass.
+pub struct Pass<'a> {
+    gpu: &'a Gpu,
+    encoder: wgpu::CommandEncoder,
+    pass: wgpu::ComputePass<'static>,
+    groups: &'a mut Groups,
+    next: usize,
+    /// The call's number and the submissions marked so far (see `Gpu::marks`).
+    call: u32,
+    marked: u32,
+    /// The last submission `flush` made.
+    queued: Option<wgpu::SubmissionIndex>,
+}
+
+impl<'a> Pass<'a> {
+    fn new(gpu: &'a Gpu, groups: &'a mut Groups, call: u32) -> Self {
+        let (encoder, pass) = gpu.begin();
+        Self {
+            gpu,
+            encoder,
+            pass,
+            groups,
+            next: 0,
+            call,
+            marked: 0,
+            queued: None,
+        }
+    }
+
+    /// Records an encoder's layers, `layer(pass, item)` for each item, each returning the buffer it
+    /// wrote last; on the portable path each layer is its own submission (see `flush`).
+    pub fn layers<'b, T>(
+        &mut self,
+        items: &[T],
+        mut layer: impl FnMut(&mut Self, &T) -> &'b Buffer,
+    ) {
+        for item in items {
+            let out = layer(self, item);
+            self.flush(out);
+        }
+    }
+
+    /// Submits the work recorded so far, marked done once `after` is written, and waits for the
+    /// submission before it. A driver may cancel a long request (i915 20 s after it was queued,
+    /// while a slow GPU runs a minute of Parakeet for longer), so each request is short and at
+    /// most two are queued. Errors show in `Gpu::run`'s last poll. With Apple's fast kernels (F = 8)
+    /// a call stays one submission: splitting costs ~1% there, and a 20 s call ran fine.
+    fn flush(&mut self, after: &Buffer) {
+        if self.gpu.fast.size == 8 {
+            return;
+        }
+        self.mark(after);
+        let (encoder, pass) = self.gpu.begin();
+        drop(std::mem::replace(&mut self.pass, pass));
+        let done = std::mem::replace(&mut self.encoder, encoder);
+        let index = self.gpu.queue.submit([done.finish()]);
+        if let Some(previous) = self.queued.replace(index) {
+            let wait = wgpu::PollType::Wait {
+                submission_index: Some(previous),
+                timeout: None,
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            let _ = self.gpu.device.poll(wait);
+            #[cfg(target_arch = "wasm32")]
+            let _ = wait;
+        }
+    }
+
+    /// Marks the work recorded since the last mark done, once `after` is written.
+    /// Its bind group stays out of `groups`, so callers may reuse a cache across recordings that
+    /// share only a prefix of dispatches.
+    fn mark(&mut self, after: &Buffer) {
+        let gpu = self.gpu;
+        let group = self.bind_group(&gpu.kernels.mark, &[after, &gpu.marks]);
+        self.dispatch(
+            &gpu.kernels.mark,
+            &group,
+            &[self.marked, self.call],
+            [1, 1, 1],
+        );
+        self.marked += 1;
+    }
+
+    /// Dispatches `kernel` with `buffers` bound in order and `params` as immediates.
+    fn run(&mut self, kernel: &Pipeline, buffers: &[&Buffer], params: &[u32], size: [usize; 3]) {
+        let cached = |(k, b, _, _, _): &(Pipeline, Vec<Buffer>, BindGroup, Buffer, BindGroup)| {
+            k == kernel && b.iter().eq(buffers.iter().copied())
+        };
+        if !self.groups.get(self.next).is_some_and(cached) {
+            let uniform = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("speechworks dispatch parameters"),
+                size: 32,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let parameters = self
+                .gpu
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &kernel.get_bind_group_layout(1),
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    }],
+                });
+            let group = (
+                kernel.clone(),
+                buffers.iter().map(|b| (*b).clone()).collect(),
+                self.bind_group(kernel, buffers),
+                uniform,
+                parameters,
+            );
+            if self.next < self.groups.len() {
+                self.groups[self.next] = group;
+            } else {
+                self.groups.push(group);
+            }
+        }
+        let (_, _, group, uniform, parameters) = &self.groups[self.next];
+        self.gpu
+            .queue
+            .write_buffer(uniform, 0, bytemuck::cast_slice(params));
+        self.pass.set_pipeline(kernel);
+        self.pass.set_bind_group(0, group, &[]);
+        self.pass.set_bind_group(1, parameters, &[]);
+        self.pass
+            .dispatch_workgroups(size[0] as u32, size[1] as u32, size[2] as u32);
+        self.next += 1;
+    }
+
+    fn bind_group(&self, kernel: &Pipeline, buffers: &[&Buffer]) -> BindGroup {
+        let entries: Vec<_> = buffers
+            .iter()
+            .enumerate()
+            .map(|(i, b)| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: b.as_entire_binding(),
+            })
+            .collect();
+        let layout = kernel.get_bind_group_layout(0);
+        let desc = wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &layout,
+            entries: &entries,
+        };
+        self.gpu.device.create_bind_group(&desc)
+    }
+
+    fn dispatch(
+        &mut self,
+        kernel: &Pipeline,
+        group: &BindGroup,
+        params: &[u32],
+        [x, y, z]: [usize; 3],
+    ) {
+        self.pass.set_pipeline(kernel);
+        self.pass.set_bind_group(0, group, &[]);
+        let mut padded = [0u32; 8];
+        padded[..params.len()].copy_from_slice(params);
+        let uniform = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.gpu
+            .queue
+            .write_buffer(&uniform, 0, bytemuck::cast_slice(&padded));
+        let parameters = self
+            .gpu
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &kernel.get_bind_group_layout(1),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                }],
+            });
+        self.pass.set_bind_group(1, &parameters, &[]);
+        self.pass.dispatch_workgroups(x as u32, y as u32, z as u32);
+    }
+
+    /// `c = epilogue(a·Wᵀ + b)` for `m` rows of `a`.
+    pub fn gemm(&mut self, a: &Buffer, l: &Linear, c: &Buffer, m: usize, epilogue: Epilogue) {
+        let gpu = self.gpu;
+        let [mode, alpha] = epilogue.params();
+        let params = [
+            m as u32,
+            l.cols as u32,
+            l.k as u32,
+            mode,
+            alpha,
+            l.dual as u32,
+        ];
+        // Only Q8_0 reads scales; other types bind the bias in their place.
+        let scales = l.scales.as_ref().unwrap_or(&l.bias);
+        if let Some(t) = &gpu.fast.tensor {
+            // The tensor GEMM reads a as f16 from device memory (k is a multiple of 32 by `linear`).
+            let (h, n4) = (gpu.halves(m * l.k), m * l.k / 4);
+            self.run(
+                &t.cast,
+                &[a, &h],
+                &[n4 as u32],
+                [n4.div_ceil(256).min(65535), 1, 1],
+            );
+            let size = [l.n / 64, m.div_ceil(128), 1];
+            return self.run(
+                &t.gemm[l.ty],
+                &[&h, &l.bias, c, &l.weight, scales],
+                &params,
+                size,
+            );
+        }
+        let buffers = [a, &l.bias, c, &l.weight, scales];
+        let f = gpu.fast.size;
+        match (&gpu.fast.gemm, gpu.tile_rows(l.n, m)) {
+            (Some(k), Some(rows)) => {
+                let tall = rows > 4 * f;
+                self.run(
+                    &k[2 * l.ty + tall as usize],
+                    &buffers,
+                    &params,
+                    [l.n.div_ceil(8 * f), m.div_ceil(rows), 1],
+                )
+            }
+            _ => {
+                let [cols, rows] = gpu.kernels.gemm_tile;
+                let size = [l.n.div_ceil(cols), m.div_ceil(rows), 1];
+                self.run(&gpu.kernels.gemm[l.ty], &buffers, &params, size)
+            }
+        }
+    }
+
+    /// LayerNorm over `rows` rows of `cols` into `y`; with `rope` (a table, `yr`, head_dim) also the
+    /// same with rotary embedding into `yr`. The table holds per position head_dim / 2 cosines
+    /// followed by as many sines.
+    pub fn layer_norm(
+        &mut self,
+        x: &Buffer,
+        n: &Channels,
+        y: &Buffer,
+        rows: usize,
+        cols: usize,
+        rope: Option<(&Buffer, &Buffer, usize)>,
+    ) {
+        let gpu = self.gpu;
+        let (table, yr, head_dim) = rope.unwrap_or((x, &gpu.spare, 0));
+        let params = [rows as u32, cols as u32, head_dim as u32];
+        let buffers = [x, &n.w, &n.b, y, table, yr];
+        match &gpu.fast.layer_norm {
+            Some(k) => self.run(k, &buffers, &params, [rows.div_ceil(4), 1, 1]),
+            None => self.run(&gpu.kernels.layer_norm, &buffers, &params, [rows, 1, 1]),
+        }
+    }
+
+    /// LayerNorm of one row of `cols` from `x` into `y`: the decoder's, with subgroup sums on the
+    /// fast tier.
+    pub fn layer_norm_row(&mut self, x: &Buffer, n: &Channels, y: &Buffer, cols: usize) {
+        match &self.gpu.decoder().layer_norm {
+            Some(k) => self.run(
+                k,
+                &[x, &n.w, &n.b, y, x, &self.gpu.spare],
+                &[1, cols as u32, 0],
+                [1, 1, 1],
+            ),
+            None => self.layer_norm(x, n, y, 1, cols, None),
+        }
+    }
+
+    /// `c[offset..]` = `epilogue(a·Wᵀ + b)` for one row `a`, W not rounded to f16.
+    pub fn gemv(&mut self, a: &Buffer, l: &Linear, c: &Buffer, epilogue: Epilogue, offset: usize) {
+        let [mode, alpha] = epilogue.params();
+        let params = [1, l.cols as u32, l.k as u32, mode, alpha, 0, offset as u32];
+        let buffers = [
+            a,
+            &l.bias,
+            c,
+            &l.weight,
+            l.scales.as_ref().unwrap_or(&l.bias),
+        ];
+        self.run(
+            &self.gpu.decoder().gemv[l.ty],
+            &buffers,
+            &params,
+            [l.cols / 32, 1, 1],
+        );
+    }
+
+    /// `c` = row `ids[i]` of the table `l` + `pos[offset..]` + the table's bias, `l.k` values. `ids`
+    /// holds token ids as u32 bits, so a step can be recorded before its token is known.
+    pub fn embed(
+        &mut self,
+        l: &Linear,
+        pos: &Buffer,
+        c: &Buffer,
+        (ids, i): (&Buffer, usize),
+        offset: usize,
+    ) {
+        let params = [i as u32, l.n as u32, l.k as u32, 0, 0, 0, offset as u32];
+        let buffers = [
+            pos,
+            &l.bias,
+            c,
+            &l.weight,
+            l.scales.as_ref().unwrap_or(&l.bias),
+            ids,
+        ];
+        self.run(
+            &self.gpu.decoder().embed[l.ty],
+            &buffers,
+            &params,
+            [l.k.div_ceil(256), 1, 1],
+        );
+    }
+
+    /// Attention of one query per head, `q` `[heads · head_dim]`, over keys 0..n of an F16 cache of
+    /// `cols` positions (see `pack`) into `o`, through `part` (`attend_len` floats).
+    #[allow(clippy::too_many_arguments)]
+    pub fn attend(
+        &mut self,
+        q: &Buffer,
+        kv: &Buffer,
+        part: &Buffer,
+        o: &Buffer,
+        n: usize,
+        cols: usize,
+        heads: usize,
+        hd: usize,
+    ) {
+        let scale = (1.0 / (hd as f32).sqrt()).to_bits();
+        let params = [n as u32, hd as u32, scale, cols as u32];
+        let k = self.gpu.decoder();
+        self.run(
+            &k.attend,
+            &[q, kv, part],
+            &params,
+            [n.div_ceil(ATTEND_KEYS), heads, 1],
+        );
+        self.run(&k.combine, &[part, o], &params, [heads, 1, 1]);
+    }
+
+    /// Packs `rows` rows of `x` from float `src` on, `stride` floats apart, each K then V of `d`
+    /// floats, into the F16 cache `y` of `cols` positions at positions `col..`. The cache holds K
+    /// transposed (pair i of position j at word i·cols + j), then V by position (word d/2·cols +
+    /// j·d/2 + i).
+    #[allow(clippy::too_many_arguments)]
+    pub fn pack(
+        &mut self,
+        x: &Buffer,
+        [src, stride]: [usize; 2],
+        y: &Buffer,
+        rows: usize,
+        d: usize,
+        [cols, col]: [usize; 2],
+    ) {
+        let params = [rows, d, 0, cols, col, src, stride].map(|v| v as u32);
+        let size = if rows == 1 {
+            [d.div_ceil(256), 1, 1]
+        } else {
+            [rows.div_ceil(64), d.div_ceil(4), 1]
+        };
+        self.run(&self.gpu.decoder().pack, &[x, y], &params, size);
+    }
+
+    /// Columns for a conv1d with `[kernel, stride, pad]` over `x` `[t][ch]`, rows of `ch · kernel`
+    /// padded with zeros to a multiple of 32.
+    pub fn im2col(&mut self, x: &Buffer, col: &Buffer, t: usize, ch: usize, conv: [usize; 3]) {
+        let [kernel, stride, pad] = conv;
+        let rows = (t + 2 * pad - kernel) / stride + 1;
+        let params = [t, ch, 0, 0, kernel, 0, stride, pad].map(|v| v as u32);
+        let width = (ch * kernel).next_multiple_of(32);
+        self.run(
+            &self.gpu.kernels.im2col,
+            &[x, col],
+            &params,
+            [width.div_ceil(256), rows, 1],
+        );
+    }
+
+    /// Conformer conv module between the pointwise convs: GLU, depthwise conv (odd `kernel`,
+    /// centred) + bias, `norm`, SiLU. `h` is `[t][2·ch]`, `y` is `[t][ch]`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv_glu(
+        &mut self,
+        h: &Buffer,
+        dw: &Channels,
+        kernel: usize,
+        n: &Channels,
+        norm: ConvNorm,
+        y: &Buffer,
+        t: usize,
+        ch: usize,
+    ) {
+        let gpu = self.gpu;
+        let buffers = [h, &dw.w, &dw.b, &n.w, &n.b, y];
+        let layer_norm = (norm == ConvNorm::LayerNorm) as u32;
+        let params = [t as u32, ch as u32, 0, 0, kernel as u32, layer_norm];
+        match &gpu.fast.conv_glu {
+            Some(k) => self.run(k, &buffers, &params, [t.div_ceil(4), 1, 1]),
+            None => self.run(&gpu.kernels.conv_glu, &buffers, &params, [t, 1, 1]),
+        }
+    }
+
+    /// Multi-head attention over `qk` `[t][q | k]` and `v` `[t][heads · head_dim]` into `o`, or
+    /// without `v` over `qk` `[t][q | k | v]`. With relative positions `pos`, the projected positions
+    /// `[pos_rows(t)][heads · head_dim]` (row r is position t + 15 − r), it is over `qk`
+    /// `[t][q + u | k | v | q + v]` (no `v`): score (i, j) is then `((q + u)_i·k_j + (q + v)_i·pos[j
+    /// − i + t + 15]) / √head_dim`. `s` holds `scores_len` floats. Apple's fast path reads rows of
+    /// `qk` and `v` up to `t` rounded up to 64, which must be finite, and with heads of 4·(2k + 1)
+    /// dims 4 floats past the last row of `v`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attention(
+        &mut self,
+        qk: &Buffer,
+        v: Option<&Buffer>,
+        pos: Option<&Buffer>,
+        s: &Buffer,
+        o: &Buffer,
+        t: usize,
+        heads: usize,
+        head_dim: usize,
+    ) {
+        let ch = (heads * head_dim) as u32;
+        // attention.wgsl's params: stride, v_stride, v_offset and relative after t, ch, head_dim and
+        // the scale. A flash workgroup takes 64 queries, with relative positions 16.
+        let (v, [a, b, c, d], queries) = match (v, pos) {
+            (Some(v), _) => (v, [2 * ch, ch, 0, 0], 64),
+            (None, None) => (qk, [3 * ch, 3 * ch, 2 * ch, 0], 64),
+            (None, Some(_)) => (qk, [4 * ch, 4 * ch, 2 * ch, 1], 16),
+        };
+        let scale = (1.0 / (head_dim as f32).sqrt()).to_bits();
+        let params = [t as u32, ch, head_dim as u32, scale, a, b, c, d];
+        let pos = pos.unwrap_or(qk);
+        if let Some(k) = self.gpu.flash(head_dim, d == 1) {
+            let buffers: &[&Buffer] = if d == 1 {
+                &[qk, v, pos, o]
+            } else {
+                &[qk, v, o]
+            };
+            return self.run(
+                k,
+                buffers,
+                &params[..7 + d as usize],
+                [t.div_ceil(queries), heads, 1],
+            );
+        }
+        let (k, tiles) = (&self.gpu.kernels, t.div_ceil(16));
+        if Gpu::portable_flash(head_dim, d == 1) {
+            let (k, buffers) = if d == 1 {
+                (&k.relative, [qk, pos, o])
+            } else {
+                (&k.flash, [qk, v, o])
+            };
+            return self.run(k, &buffers, &params[..7], [t.div_ceil(32), heads, 1]);
+        }
+        self.run(&k.scores, &[qk, pos, s], &params, [tiles, tiles, heads]);
+        self.run(&k.softmax, &[s], &params[..1], [t, heads, 1]);
+        self.run(&k.values, &[s, v, o], &params, [tiles, heads, 1]);
+    }
+
+    /// Depthwise 3×3 conv, stride 2, padding 1, + bias (weight `[9][ch]`) over the image
+    /// `[t][f][ch]` into output rows t0..t0 + rows of `y` `[⌈t/2⌉][⌈f/2⌉][ch]`; `x` holds the
+    /// image's rows from 2·t0 − 1 on. With `first` the image is ReLU(`first` + bias), a 3×3
+    /// stride-2 conv from the one-channel image `x` `[t][f]` to ch channels that is never stored,
+    /// and `y` gets `rows` rows of `[⌈f/4⌉][ch]`, the output rows from 2·t0 − 1 on, those from
+    /// ⌈t/4⌉ on zero.
+    #[allow(clippy::too_many_arguments)]
+    pub fn depthwise(
+        &mut self,
+        x: &Buffer,
+        first: Option<&Channels>,
+        dw: &Channels,
+        y: &Buffer,
+        image: [usize; 3],
+        t0: usize,
+        rows: usize,
+    ) {
+        let k = &self.gpu.kernels;
+        let [t, f, ch] = image.map(|v| v as u32);
+        let params = [t, f, ch, t0 as u32];
+        match first {
+            None => self.run(
+                &k.depthwise,
+                &[x, &dw.w, &dw.b, y],
+                &params,
+                [half(image[1]), rows, 1],
+            ),
+            Some(c) => {
+                let buffers = [x, &dw.w, &dw.b, y, &c.w, &c.b];
+                self.run(
+                    &k.first_depthwise,
+                    &buffers,
+                    &params,
+                    [half(half(image[1])), rows, 1],
+                );
+            }
+        }
+    }
+
+    /// Rotary embedding in place over `rows` rows `[q | k | v]` of `heads` heads of `hd`, at
+    /// positions `pos..`: in q's and k's heads the pairs (2i, 2i + 1) for 2i < `rot` rotate. The
+    /// table holds per position `rot` / 2 cosines, then as many sines.
+    pub fn rope(
+        &mut self,
+        table: &Buffer,
+        qkv: &Buffer,
+        rows: usize,
+        pos: usize,
+        shape: [usize; 3],
+    ) {
+        let [heads, hd, rot] = shape;
+        let params = [rows, 3 * heads * hd, hd, 0, rot, 0, 2 * heads, pos].map(|v| v as u32);
+        let size = [(heads * rot).div_ceil(256), rows, 1];
+        self.run(&self.gpu.kernels.rope, &[table, qkv], &params, size);
+    }
+
+    /// GroupNorm with one group, in place over `x` `[t][ch]`: normalized over all its values, then
+    /// times `n.w` and plus `n.b` per channel.
+    pub fn group_norm(&mut self, x: &Buffer, n: &Channels, t: usize, ch: usize, eps: f32) {
+        let params = [t as u32, ch as u32, 0, eps.to_bits()];
+        self.run(
+            &self.gpu.kernels.group_norm,
+            &[x, &n.w, &n.b],
+            &params,
+            [1, 1, 1],
+        );
+    }
+
+    /// SwiGLU in place over one row `h` `[x | gate]` of 2·`ch`: `h[..ch]` = SiLU(gate) · x.
+    pub fn swiglu(&mut self, h: &Buffer, ch: usize) {
+        self.run(
+            &self.gpu.kernels.swiglu,
+            &[h],
+            &[0, ch as u32],
+            [ch.div_ceil(256), 1, 1],
+        );
+    }
+
+    /// The index of the largest of `x[..n]` (the lowest on a tie), as the bits of `out[0]`.
+    pub fn argmax(&mut self, x: &Buffer, out: &Buffer, n: usize) {
+        self.run(&self.gpu.kernels.argmax, &[x, out], &[n as u32], [1, 1, 1]);
+    }
+
+    /// `x` `[t][f][ch]` to `y` `[t][ch · f]`, channel-major.
+    pub fn flatten(&mut self, x: &Buffer, y: &Buffer, t: usize, f: usize, ch: usize) {
+        let k = &self.gpu.kernels.flatten;
+        self.run(k, &[x, y], &[t as u32, f as u32, ch as u32], [t, 1, 1]);
+    }
+}
+
+#[cfg(test)]
+impl Gpu {
+    pub(crate) fn destroy_for_test(&self) {
+        self.device.destroy();
+    }
+}
