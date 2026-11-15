@@ -19,7 +19,7 @@ Supply finite mono float PCM in `[-1, 1]` at 16 kHz. The default per-call limit 
 
 `Backend::Auto` attempts the GPU, then selects CPU if initialization fails. If GPU execution fails, it retries the complete phrase on CPU. `fallback_reason()` records that decision. `Backend::Gpu` requires GPU success and reports an error instead of hiding CPU use. Run one transcription at a time on each `Model`; a concurrent call returns `Error::Busy`. Native callers can use an async executor or `pollster::block_on` on a background thread. Browser callers must await the future in a worker.
 
-GPU execution uses reusable activation buffers and cached uniform parameter buffers. There are no native-only push constants or blocking waits in the WASM path. Native optimized SIMD CPU code retains its upstream safety comments. WASM runs CPU inference on one worker without requiring shared memory or cross-origin isolation.
+GPU execution uses reusable activation buffers and cached uniform parameter buffers. There are no native-only push constants or blocking waits in the WASM path. Native optimized SIMD CPU code retains its upstream safety comments. WASM runs CPU inference on one worker without requiring shared memory or cross-origin isolation. With `simd128`, dot products and Q8 decoding use explicit plain-SIMD kernels; scalar builds retain the portable path. Plain SIMD uses separate multiply/add rounding rather than emulated fused arithmetic. See [CPU performance and validation](../../docs/wasm-cpu-performance.md) for measured gains and accuracy limits.
 
 ## Validation
 

@@ -5,6 +5,8 @@
 pub mod gemm;
 pub mod ops;
 pub mod transformer;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod wasm_simd;
 
 use std::sync::{Mutex, OnceLock, PoisonError};
 
@@ -14,15 +16,19 @@ use crate::error::Result;
 use crate::gguf::{Tensor, Type};
 use crate::{Api, Device, DeviceKind, Kernels};
 
-/// Dot product with 16 independent accumulators (four FMA vectors in flight), summed pairwise so
-/// the final reduction also vectorizes.
+/// Dot product with 16 independent accumulators, summed pairwise. Native paths use fused
+/// multiply-add; plain WASM SIMD uses separate multiply/add (see `wasm_simd`).
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    return wasm_simd::dot(a, b);
+
     #[cfg(target_arch = "x86_64")]
     if x86::avx2() {
         // SAFETY: the CPU has AVX2 and FMA.
         return unsafe { x86::dot(a, b) };
     }
 
+    #[allow(unreachable_code)]
     let ((a16, a_tail), (b16, b_tail)) = (a.as_chunks::<16>(), b.as_chunks::<16>());
     let mut acc = [0f32; 16];
     for (x, y) in a16.iter().zip(b16) {
@@ -60,7 +66,9 @@ pub fn path() -> &'static str {
         return "AVX2+FMA";
     }
 
-    if cfg!(target_arch = "aarch64") {
+    if cfg!(all(target_arch = "wasm32", target_feature = "simd128")) {
+        "WASM SIMD128"
+    } else if cfg!(target_arch = "aarch64") {
         "NEON"
     } else {
         "portable"
@@ -333,12 +341,22 @@ impl Q8 {
 
     #[cfg(not(target_arch = "aarch64"))]
     fn rows(&self, r0: usize, x: &[f32], out: &mut [f32]) {
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        return wasm_simd::q8_rows(
+            &self.q[r0 * self.k..],
+            &self.d[r0 * self.k / 32..],
+            self.k,
+            x,
+            out,
+        );
+
         #[cfg(target_arch = "x86_64")]
         if x86::avx2() {
             // SAFETY: the CPU has AVX2 and FMA.
             return unsafe { x86::rows(self, r0, x, out) };
         }
 
+        #[allow(unreachable_code)]
         for (r, o) in out.iter_mut().enumerate() {
             *o = dot(&self.row(r0 + r), x);
         }

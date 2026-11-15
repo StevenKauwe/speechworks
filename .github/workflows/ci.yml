@@ -36,6 +36,8 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npx playwright install --with-deps chromium
+      - name: WASM SIMD numerical and bounds regression
+        run: npm run test:wasm-kernels
       - name: Build runtime and verify pinned models
         run: tools/install-web.sh --dest "$RUNNER_TEMP/speechworks" --model-dir "$RUNNER_TEMP/models"
       - name: Fetch public-domain speech fixture
