@@ -111,6 +111,13 @@ other models or download hosts. SHA-256 and byte lengths are required. The
 generated `models.json` points to same-origin, content-addressed model files.
 Large browser downloads are cached in 64 MiB pieces with a completion marker,
 and the complete pinned checksum is rechecked on every load.
+For hosts with a per-file limit, add `--model-part-bytes 67108864` to the
+installer. Models larger than 64 MiB are served as ordered files of at most
+that size. The worker joins them while downloading and verifies the same full
+checksum before inference; all requests remain same-origin. The manifest's
+`url` remains the cache identity, while optional `parts` entries specify each
+download's `url` (relative to that identity) and `bytes`. No single full-size
+file is published for a split model.
 The normal build includes both plain and relaxed-SIMD serial artifacts. The
 worker probes support before loading the optional faster artifact and preserves
 the compatible fallback. Direct imports of `speechworks_web.js` remain plain

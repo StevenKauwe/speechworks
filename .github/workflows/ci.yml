@@ -54,6 +54,10 @@ jobs:
         run: SPEECHWORKS_TEST_STREAMING_MODELS="$RUNNER_TEMP/models" cargo test --release --locked -p speechworks-inference cpu_streaming_matches_reference -- --ignored --nocapture
       - name: Streaming Medium in single-thread browser CPU
         run: node tests/browser-streaming.mjs --root "$RUNNER_TEMP/speechworks" --fixture "$RUNNER_TEMP/models/jfk.wav" --models streaming-medium --output test-results/streaming-plain.json
+      - name: Split large model files for static hosts and verify real browser loading
+        run: |
+          cargo run --locked --release -p speechworks-assets -- --root "$GITHUB_WORKSPACE" --dest "$RUNNER_TEMP/speechworks-parts" --model-dir "$RUNNER_TEMP/models" --model-part-bytes 67108864
+          node tests/browser-model-parts.mjs --root "$RUNNER_TEMP/speechworks-parts" --fixture "$RUNNER_TEMP/models/jfk.wav"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
