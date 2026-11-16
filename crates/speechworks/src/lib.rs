@@ -104,6 +104,9 @@ pub struct DecodeRequest {
     pub phrase: u64,
     pub revision: u64,
     pub samples: Vec<f32>,
+    /// Real captured audio before the optional synthetic decode tail. Native
+    /// streaming previews must not cache the temporary silence appended here.
+    pub audio_samples: usize,
     pub is_final: bool,
 }
 
@@ -245,6 +248,7 @@ impl Session {
             phrase: self.phrase,
             revision: self.revision,
             samples,
+            audio_samples: count * FRAME_SAMPLES,
             is_final: true,
         });
         self.phrase += 1;
@@ -283,6 +287,7 @@ impl Session {
             phrase: self.phrase,
             revision: self.revision,
             samples: self.collect(self.audio.len()),
+            audio_samples: self.audio.len() * FRAME_SAMPLES,
             is_final: false,
         })
     }
@@ -367,12 +372,19 @@ mod tests {
         let mut s = Session::new(Config::default()).unwrap();
         push(&mut s, 8, 0.9, 0.25);
         let preview = s.preview().unwrap();
+        assert_eq!(preview.audio_samples, 8 * 512);
+        assert!(
+            preview.samples[preview.audio_samples..]
+                .iter()
+                .all(|x| *x == 0.0)
+        );
         assert!(s.is_current(&preview));
         push(&mut s, 16, 0.0, 0.0);
         assert!(!s.is_current(&preview));
         let final_ = s.take_final().unwrap();
         assert_eq!(final_.phrase, 0);
         assert_eq!(final_.samples.len(), 24 * 512 + 4800);
+        assert_eq!(final_.audio_samples, 24 * 512);
         s.finish().unwrap();
         assert!(s.take_final().is_none());
     }

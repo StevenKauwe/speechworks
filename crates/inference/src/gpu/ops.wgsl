@@ -269,7 +269,7 @@ fn argmax(@builtin(local_invocation_index) lid: u32) {
   }
   first = reduce(first, lid, true);
   if (lid == 0u) {
-    am_out[0] = u32(-first);
+    am_out[p.ch] = u32(-first);
   }
 }
 

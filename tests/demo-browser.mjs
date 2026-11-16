@@ -40,7 +40,7 @@ try {
   browser = await chromium.launch({
     headless: process.env.HEADLESS !== '0',
     ...(process.env.CHROME_EXECUTABLE ? {executablePath: process.env.CHROME_EXECUTABLE} : {}),
-    args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${path.join(root, 'sample.wav')}`],
+    args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--disable-features=AudioServiceSandbox,AudioServiceOutOfProcess', `--use-file-for-fake-audio-capture=${path.join(root, 'sample.wav')}`],
   });
   const context = await browser.newContext({viewport: {width: 1440, height: 1120}, permissions: ['microphone', 'clipboard-read', 'clipboard-write']});
   context.on('request', request => {
@@ -75,7 +75,7 @@ try {
   };
   await page.goto(url);
   await page.waitForFunction(() => !document.getElementById('sample').disabled);
-  assert.equal(await page.locator('#model').inputValue(), 'base');
+  assert.equal(await page.locator('#model').inputValue(), 'streaming-medium');
   assert.equal(requested.filter(url => url.endsWith('.gguf')).length, 0);
   assert.equal(await page.evaluate(() => window.__micCalls), 0);
   check('Initial page makes no model download or microphone request');
@@ -92,9 +92,15 @@ try {
   await page.locator('#copy').click();
   assert.equal(await page.evaluate(() => navigator.clipboard.readText()), await value());
   await page.screenshot({path: path.join(output, 'demo-desktop.png'), fullPage: true});
-  check('Base sample produces real speech text, actual backend/timing, cached weights, and copyable text');
+  check('Streaming Medium produces real speech text, actual backend/timing, cached weights, and copyable text');
 
   if (!args['--smoke']) {
+    await context.route('**/*.gguf', route => route.abort());
+    await page.locator('#previews').uncheck(); // Recreate the engine, retaining only disk cache.
+    await sample();
+    await context.unroute('**/*.gguf');
+    await page.locator('#previews').check();
+    check('A fresh engine reuses the complete large model with network downloads blocked');
     await page.locator('#transcript').fill('An edited opening.');
     await page.locator('#record').click();
     await page.waitForFunction(() => document.body.dataset.state === 'recording', null, {timeout: 120000});

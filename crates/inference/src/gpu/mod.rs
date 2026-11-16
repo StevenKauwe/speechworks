@@ -20,6 +20,40 @@ pub type Groups = Vec<(Pipeline, Vec<Buffer>, BindGroup, Buffer, BindGroup)>;
 /// Submissions a call may make (slots in `Gpu::marks`).
 const MARKS: u64 = 256;
 
+const MATRIX_FEATURES: wgpu::Features = wgpu::Features::SUBGROUP
+    .union(wgpu::Features::SUBGROUP_BARRIER)
+    .union(wgpu::Features::SHADER_F16)
+    .union(wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX);
+
+fn matrix_size(adapter: &wgpu::Adapter) -> Option<usize> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::env::var("SPEECHWORKS_GPU_KERNELS").as_deref() == Ok("portable") {
+        return None;
+    }
+    use wgpu::CooperativeScalarType::{F16, F32};
+    let info = adapter.get_info();
+    if !adapter.features().contains(MATRIX_FEATURES)
+        || !(info.subgroup_min_size..=info.subgroup_max_size).contains(&32)
+    {
+        return None;
+    }
+    let shapes = adapter.cooperative_matrix_properties();
+    let has = |size| {
+        shapes.iter().any(|p| {
+            (p.m_size, p.n_size, p.k_size, p.ab_type, p.cr_type) == (size, size, size, F16, F32)
+        })
+    };
+    // Follow the tested driver families. Other adapters retain portable WGSL;
+    // exposing the feature alone is insufficient evidence of a usable driver.
+    if info.backend == wgpu::Backend::Metal && has(8) {
+        Some(8)
+    } else if info.vendor == 0x10de && has(16) {
+        Some(16)
+    } else {
+        None
+    }
+}
+
 /// The backend actually selected by [`crate::Model`]. Report this in diagnostics instead of
 /// assuming that GPU inference was available. Browser adapter names may be anonymized.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -53,6 +87,8 @@ pub enum DeviceKind {
 #[non_exhaustive]
 pub enum Kernels {
     Portable,
+    Matrix8,
+    Matrix16,
     Cpu,
 }
 
@@ -181,6 +217,16 @@ struct Portable {
     gemm_module: wgpu::ShaderModule,
     /// Compiled on first use: only encoder–decoder models need them.
     decoder: OnceLock<Decoder>,
+    streaming: OnceLock<StreamingKernels>,
+}
+
+struct StreamingKernels {
+    cmvn: Pipeline,
+    join: Pipeline,
+    rows: Pipeline,
+    columns: Pipeline,
+    attention: Pipeline,
+    positions: Pipeline,
 }
 
 impl Portable {
@@ -225,6 +271,7 @@ impl Portable {
             mark: pipeline(device, &ops, "mark", &[]),
             gemm_module: gemm,
             decoder: OnceLock::new(),
+            streaming: OnceLock::new(),
         }
     }
 }
@@ -349,10 +396,16 @@ impl Gpu {
             return Err(Error::Gpu("software GPU; use the Rust CPU backend".into()));
         }
         let info = Device::new(&adapter.get_info(), Kernels::Portable);
+        let matrix = matrix_size(&adapter);
+        let features = if matrix.is_some() {
+            MATRIX_FEATURES
+        } else {
+            wgpu::Features::empty()
+        };
         let supported = adapter.limits();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                required_features: wgpu::Features::empty(),
+                required_features: features,
                 required_limits: wgpu::Limits {
                     max_buffer_size: supported.max_buffer_size,
                     max_storage_buffer_binding_size: supported.max_storage_buffer_binding_size,
@@ -361,6 +414,13 @@ impl Gpu {
                     ..Default::default()
                 },
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
+                experimental_features: if matrix.is_some() {
+                    // SAFETY: only bundled, shape-checked shaders use cooperative
+                    // matrices, after numerical and subgroup-layout probes below.
+                    unsafe { wgpu::ExperimentalFeatures::enabled() }
+                } else {
+                    wgpu::ExperimentalFeatures::disabled()
+                },
                 ..Default::default()
             })
             .await?;
@@ -394,7 +454,7 @@ impl Gpu {
             MARKS * 4,
             wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         );
-        Ok(Self {
+        let mut gpu = Self {
             info,
             device,
             queue,
@@ -409,7 +469,111 @@ impl Gpu {
             busy: Mutex::new(()),
             failure,
             halves: Mutex::new(None),
-        })
+        };
+        if let Some(size) = matrix {
+            gpu.enable_matrix(size).await?;
+        }
+        Ok(gpu)
+    }
+
+    async fn enable_matrix(&mut self, size: usize) -> Result<()> {
+        let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let internal = self.device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let source = include_str!("gemm_fast.wgsl")
+            .replace("F: u32 = 8u", &format!("F: u32 = {size}u"))
+            .replace("8x8", &format!("{size}x{size}"));
+        let module = module(&self.device, &source);
+        let pipelines: Vec<_> = (0..6)
+            .map(|i| {
+                pipeline(
+                    &self.device,
+                    &module,
+                    "gemm",
+                    &[
+                        ("WTYPE", (i / 2) as f64),
+                        ("ROWS", ((4 * size) << (i % 2)) as f64),
+                    ],
+                )
+            })
+            .collect();
+        let error_internal = internal.pop().await;
+        let error_validation = validation.pop().await;
+        if error_internal.is_some() || error_validation.is_some() {
+            return Ok(());
+        }
+        // Verify all six kernels' subgroup layout, then actual F32/F16/Q8
+        // arithmetic with partial row/column tiles. Unsupported paths retain
+        // portable GEMM, without changing a model's numerical contract.
+        for (i, kernel) in pipelines.iter().enumerate() {
+            let buffers: Vec<_> = (0..5).map(|_| self.buffer(16)).collect();
+            let read = self.readback(2);
+            let got = self
+                .run(&mut Vec::new(), &buffers[2], &read, 2, |p| {
+                    p.run(
+                        kernel,
+                        &buffers.iter().collect::<Vec<_>>(),
+                        &[0; 7],
+                        [1, 1, 1],
+                    );
+                })
+                .await?;
+            if got != [32.0, 4.0] {
+                return Ok(());
+            }
+            let (m, n, k) = (65usize, 68usize, 64usize);
+            let a: Vec<f32> = (0..m * k)
+                .map(|v| ((v / k + v % k) % 31) as f32 - 15.0)
+                .collect();
+            let a = self.upload(&a)?;
+            let mut weights = Vec::<u8>::new();
+            for row in 0..128 {
+                for col in 0..k {
+                    let value = if row < n && col == row % k {
+                        1.0f32
+                    } else {
+                        0.0
+                    };
+                    match i / 2 {
+                        0 => weights.extend(value.to_le_bytes()),
+                        1 => weights.extend(half::f16::from_f32(value).to_le_bytes()),
+                        _ => weights.push(value as u8),
+                    }
+                }
+            }
+            let mut upload = self.fill(weights.len(), weights.len())?;
+            upload.slice(0..weights.len()).copy_from_slice(&weights);
+            let weight = self.filled(upload);
+            let scale = self.upload(&vec![f32::from_bits(0x3c003c00); 128 * k / 64])?;
+            let bias = self.buffer(128);
+            let out = self.buffer(m * n);
+            let read = self.readback(m * n);
+            let rows = (4 * size) << (i % 2);
+            let got = self
+                .run(&mut Vec::new(), &out, &read, m * n, |p| {
+                    p.run(
+                        kernel,
+                        &[&a, &bias, &out, &weight, &scale],
+                        &[m as u32, n as u32, k as u32, 0, 0, 0],
+                        [128usize.div_ceil(8 * size), m.div_ceil(rows), 1],
+                    );
+                })
+                .await?;
+            if got
+                .iter()
+                .enumerate()
+                .any(|(v, x)| *x != ((v / n + (v % n) % k) % 31) as f32 - 15.0)
+            {
+                return Ok(());
+            }
+        }
+        self.fast.size = size;
+        self.fast.gemm = Some(pipelines);
+        self.info.kernels = if size == 8 {
+            Kernels::Matrix8
+        } else {
+            Kernels::Matrix16
+        };
+        Ok(())
     }
 
     /// Fail before allocating or recording against a lost device.
@@ -549,6 +713,32 @@ impl Gpu {
     /// f16 either way.
     pub fn conv(&self, weight: Tensor, bias: &[f32]) -> Result<Linear> {
         self.upload_linear(&[weight], bias, true)
+    }
+
+    /// Compact output rows with a padded K dimension. The caller explicitly
+    /// pads inputs; Small's 620-wide encoder cannot use square 32-wide shapes.
+    pub fn linear_compact(&self, weights: &[Tensor], bias: &[f32]) -> Result<Linear> {
+        let mut linear = self.upload_linear(weights, bias, true)?;
+        linear.cols = weights
+            .iter()
+            .map(|t| t.dims.last().copied().unwrap())
+            .sum();
+        Ok(linear)
+    }
+
+    fn streaming_kernels(&self) -> &StreamingKernels {
+        self.kernels.streaming.get_or_init(|| {
+            let m = module(&self.device, include_str!("streaming.wgsl"));
+            let p = |name| pipeline(&self.device, &m, name, &[]);
+            StreamingKernels {
+                cmvn: p("cmvn"),
+                join: p("join"),
+                rows: p("rows"),
+                columns: p("causal_columns"),
+                attention: p("local_attention"),
+                positions: p("positions"),
+            }
+        })
     }
 
     fn upload_linear(&self, weights: &[Tensor], bias: &[f32], pad: bool) -> Result<Linear> {
@@ -1364,6 +1554,142 @@ impl<'a> Pass<'a> {
         );
     }
 
+    pub fn streaming_cmvn(
+        &mut self,
+        pcm: &Buffer,
+        out: &Buffer,
+        rows: usize,
+        frame: usize,
+        eps: f32,
+        gain: f32,
+    ) {
+        self.run(
+            &self.gpu.streaming_kernels().cmvn,
+            &[pcm, out],
+            &[
+                rows as u32,
+                frame as u32,
+                frame.next_multiple_of(32) as u32,
+                eps.to_bits(),
+                gain.to_bits(),
+            ],
+            [rows, 1, 1],
+        );
+    }
+
+    pub fn join_rows(
+        &mut self,
+        old: &Buffer,
+        new: &Buffer,
+        out: &Buffer,
+        old_len: usize,
+        new_len: usize,
+    ) {
+        if old_len + new_len == 0 {
+            return;
+        }
+        self.run(
+            &self.gpu.streaming_kernels().join,
+            &[old, new, out],
+            &[old_len as u32, new_len as u32],
+            [(old_len + new_len).div_ceil(256), 1, 1],
+        );
+    }
+
+    pub fn copy_rows(
+        &mut self,
+        x: &Buffer,
+        out: &Buffer,
+        rows: usize,
+        width: usize,
+        padded_width: usize,
+        start: usize,
+    ) {
+        if rows == 0 {
+            return;
+        }
+        self.run(
+            &self.gpu.streaming_kernels().rows,
+            &[x, out],
+            &[rows as u32, width as u32, padded_width as u32, start as u32],
+            [(rows * padded_width).div_ceil(256), 1, 1],
+        );
+    }
+
+    pub fn causal_columns(
+        &mut self,
+        x: &Buffer,
+        out: &Buffer,
+        rows: usize,
+        width: usize,
+        input_start: usize,
+        output_start: usize,
+    ) {
+        self.run(
+            &self.gpu.streaming_kernels().columns,
+            &[x, out],
+            &[
+                rows as u32,
+                width as u32,
+                input_start as u32,
+                output_start as u32,
+            ],
+            [
+                (rows * (width * 5).next_multiple_of(32)).div_ceil(256),
+                1,
+                1,
+            ],
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn local_attention(
+        &mut self,
+        qkv: &Buffer,
+        out: &Buffer,
+        rows: usize,
+        keys: usize,
+        heads: usize,
+        hd: usize,
+        start: usize,
+        window: [usize; 2],
+    ) {
+        let params = [
+            rows,
+            keys,
+            heads * hd,
+            hd,
+            heads,
+            start,
+            window[0],
+            window[1],
+        ]
+        .map(|x| x as u32);
+        self.run(
+            &self.gpu.streaming_kernels().attention,
+            &[qkv, out],
+            &params,
+            [rows, heads, 1],
+        );
+    }
+
+    pub fn audio_positions(
+        &mut self,
+        x: &Buffer,
+        positions: &Buffer,
+        out: &Buffer,
+        rows: usize,
+        width: usize,
+        start: usize,
+    ) {
+        self.run(
+            &self.gpu.streaming_kernels().positions,
+            &[x, positions, out],
+            &[rows as u32, width as u32, start as u32],
+            [(rows * width).div_ceil(256), 1, 1],
+        );
+    }
+
     /// Conformer conv module between the pointwise convs: GLU, depthwise conv (odd `kernel`,
     /// centred) + bias, `norm`, SiLU. `h` is `[t][2·ch]`, `y` is `[t][ch]`.
     #[allow(clippy::too_many_arguments)]
@@ -1525,7 +1851,15 @@ impl<'a> Pass<'a> {
 
     /// The index of the largest of `x[..n]` (the lowest on a tie), as the bits of `out[0]`.
     pub fn argmax(&mut self, x: &Buffer, out: &Buffer, n: usize) {
-        self.run(&self.gpu.kernels.argmax, &[x, out], &[n as u32], [1, 1, 1]);
+        self.argmax_at(x, out, n, 0);
+    }
+    pub fn argmax_at(&mut self, x: &Buffer, out: &Buffer, n: usize, offset: usize) {
+        self.run(
+            &self.gpu.kernels.argmax,
+            &[x, out],
+            &[n as u32, offset as u32],
+            [1, 1, 1],
+        );
     }
 
     /// `x` `[t][f][ch]` to `y` `[t][ch · f]`, channel-major.

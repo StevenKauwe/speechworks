@@ -5,14 +5,14 @@ GPU acceleration, and the same engine in native applications and browser workers
 Built to be shared by Agency Platform and CrabScape.
 
 **[Try the live playground →](https://stevenkauwe.github.io/speechworks/)**
-Use your microphone or a sample clip, switch between base and tiny, and compare
+Use your microphone or a sample clip, try Streaming Medium or Small, and compare
 automatic GPU acceleration with CPU inference. No account or installation;
 recognition runs in your browser. The first use downloads the selected model.
 
 The dictation behavior is independent of the model. Applications choose draft
 and final models, backend, pause thresholds, preview cadence, phrase limits, and
-memory budgets. The included inference backend supports Moonshine tiny and base
-from GGUF metadata. Other architectures need an inference adapter; changing a
+memory budgets. The included inference backend supports Moonshine Streaming
+Medium/Small and the original tiny/base models from GGUF metadata. Other architectures need an inference adapter; changing a
 model name does not make an unsupported architecture work.
 
 ## What runs where
@@ -20,7 +20,7 @@ model name does not make an unsupported architecture work.
 | Component | Responsibility |
 |---|---|
 | `speechworks` | Rust phrase boundaries, bounded queues, stop/flush, preview policy, resampling |
-| `speechworks-inference` | Moonshine model, Rust CPU kernels, portable asynchronous WGSL/`wgpu` GPU kernels |
+| `speechworks-inference` | Moonshine and Moonshine Streaming, Rust CPU kernels, asynchronous WGSL/`wgpu` GPU kernels |
 | `speechworks-vad` | Rust Silero voice detection, with streaming audio context preserved |
 | `speechworks-web` | WASM bindings and Rust Silero VAD; no ONNX Runtime |
 | `web/` | Small microphone, worker, caching, and application interface bridges |
@@ -34,15 +34,20 @@ Browsers without WebGPU use WASM SIMD CPU inference. Plain SIMD remains the
 compatible fallback; relaxed SIMD and shared-memory workers are optional.
 Cross-origin isolation is not required for the serial fallback.
 
-Live previews currently re-decode the bounded phrase in progress. This provides
-streaming dictation UX, not a cache-aware incremental Moonshine V2 encoder.
+Streaming Medium and Small cache the causal audio frontend, each encoder layer's
+bounded attention history, and decoder cross-attention projections. New audio
+is encoded once; the model's look-ahead is flushed when a phrase ends. The text
+decoder revises the current hypothesis as audio context grows. Original tiny/base
+models retain whole-phrase previews.
 Final-only mode skips preview inference. Audio never goes to a transcription
 service. Applications retain control of their own text fields.
 
-The default profile uses base for both live and final text. Set
-`models: {draft: 'tiny', final: 'base'}` for a smaller preview model. Preview
+The default profile uses `streaming-medium` for both live and final text. Set
+`models: {draft: 'streaming-small', final: 'streaming-small'}` for a smaller model.
+Using the same model for both keeps its encoder cache available at finalization. Preview
 frequency adapts to measured inference time so CPU fallback leaves processing
-time for capture and VAD; final phrases always have priority.
+time for capture and VAD; final phrases always have priority. See the
+[Streaming Medium benchmarks and validation](docs/moonshine-streaming.md).
 
 ## Native Rust
 
@@ -55,9 +60,33 @@ async fn transcribe(weights: Vec<u8>, pcm: &[f32]) -> speechworks_inference::Res
 }
 ```
 
+For incremental audio, keep a `speechworks_inference::StreamState` for each phrase:
+
+```rust,no_run
+# async fn stream(model: &speechworks_inference::Model, chunks: &[Vec<f32>]) -> speechworks_inference::Result<String> {
+use speechworks_inference::StreamState;
+let mut state = StreamState::new();
+for chunk in chunks {
+    let preview = model.transcribe_chunk(&mut state, chunk, false).await?;
+    // Replace tentative text with preview.text.
+}
+let final_text = model.transcribe_chunk(&mut state, &[], true).await?.text;
+# Ok(final_text)
+# }
+```
+
+Pass only new samples to `transcribe_chunk`. A final call flushes the model's
+look-ahead and a partial 5-ms frame; it is not reusable for a new phrase. Streaming
+Small/Medium have 240 ms of cumulative encoder look-ahead before decode and capture
+overhead. `Session` requests include `audio_samples`, the captured length before
+synthetic silence: omit that synthetic tail from streaming previews and include it
+once at finalization. The browser adapter handles this, phrase-boundary revisions,
+and cancelled recordings automatically.
+
 PCM is mono 16 kHz, finite samples in `[-1, 1]`. The default inference call is
 bounded to 30 seconds and 256 MiB of working memory, excluding weights. Use
-`LoadOptions` to set explicit limits. For continuous audio, feed `speechworks::Session`
+`LoadOptions` to set explicit limits. The working-memory bound may be reached
+before the audio-length limit for a larger model. For continuous audio, feed `speechworks::Session`
 frames and speech probabilities, drain `take_final()` before `preview()`, and
 discard a preview if its recording or phrase is no longer current. Session errors
 must reach the application; do not turn recognition failures into empty text.
@@ -80,6 +109,8 @@ and installs a complete directory. The default manifest downloads from exact
 Hugging Face revisions. Supply `--manifest path/to/models.lock.json` to choose
 other models or download hosts. SHA-256 and byte lengths are required. The
 generated `models.json` points to same-origin, content-addressed model files.
+Large browser downloads are cached in 64 MiB pieces with a completion marker,
+and the complete pinned checksum is rechecked on every load.
 The normal build includes both plain and relaxed-SIMD serial artifacts. The
 worker probes support before loading the optional faster artifact and preserves
 the compatible fallback. Direct imports of `speechworks_web.js` remain plain
@@ -103,7 +134,7 @@ import {createDictation} from '/speechworks/speechworks.js';
 
 const speech = createDictation({
   backend: 'auto',
-  models: {draft: 'base', final: 'base'},
+  models: {draft: 'streaming-medium', final: 'streaming-medium'},
   session: {previews: true, preview_interval_ms: 250},
 });
 speech.onStatus(({ready, progress, error}) => updateStatus({ready, progress, error}));
@@ -120,7 +151,7 @@ const finalText = await recording.stop();
 Keep tentative text separate from the user's editable value. Append only newly
 committed final phrases to the *current* field value, preserving typing and edits.
 Record supports `signal: AbortSignal`. A clip API is also available:
-`await speech.transcribe(float32Pcm, {model: 'base'})`. Clip inputs are capped at
+`await speech.transcribe(float32Pcm, {model: 'streaming-medium'})`. Clip inputs are capped at
 10 minutes; long clips are split into bounded speech phrases. Applications with
 their own microphone capture can import `startWorker` from `worker.js` and use
 the message protocol in `docs/protocol.md`.

@@ -1,4 +1,5 @@
 import {loadRuntime, cpuThreadOption} from './runtime-loader.js';
+import {cachedModel, cacheModel, deleteCachedModel} from './model-cache.js';
 import {createWorkerOwner} from './pool-owner.js';
 
 const describe = error => error?.message || String(error);
@@ -9,6 +10,8 @@ export function startWorker(options = {}) {
   let settings = {manifestUrl: new URL('./models.json', import.meta.url).href, backend: 'auto', ...options};
   let manifestPromise, recording = null, running = false, activeClip = false, clipQueue = [], queuedSamples = 0;
   const models = new Map();
+  const loadedModels = new Map();
+  let recordingSequence = 0;
   const devices = new Map();
   let runtime, runtimeReady;
   function ensureRuntime() {
@@ -20,11 +23,15 @@ export function startWorker(options = {}) {
   const send = data => self.postMessage(data);
   const workerOwner = createWorkerOwner(send);
   let computeSequence = 0;
-  async function transcribe(recognizer, samples) {
+  async function transcribe(recognizer, samples, phrase) {
     const token = ++computeSequence;
     const threaded = runtime.cpuThreads > 1;
     if (threaded) send({type: 'speechworks:inference-start', token});
-    try { return await recognizer.transcribe(samples); }
+    try {
+      return phrase
+        ? await recognizer.transcribePhrase(samples, phrase.key, phrase.isFinal, phrase.audioSamples)
+        : await recognizer.transcribe(samples);
+    }
     finally { if (threaded) send({type: 'speechworks:inference-end', token}); }
   }
   function reportBackend(id,recognizer) {
@@ -60,7 +67,7 @@ export function startWorker(options = {}) {
       if (url.origin !== self.location.origin) throw new Error('Models must be served by this application.');
       let cache;
       try { cache = await caches.open('speechworks-models-v1'); } catch { /* Storage may be disabled; inference still works. */ }
-      let response = await cache?.match(url.href);
+      let response = await cachedModel(cache, url.href, spec);
       let fromCache = !!response;
       if (!response) response = await fetch(url, {redirect:'error'});
       if (!response.ok) throw new Error(`${id}: HTTP ${response.status}`);
@@ -77,19 +84,20 @@ export function startWorker(options = {}) {
           }
           if (offset !== bytes.length) throw new Error(`${id}: incomplete model download`);
         } catch(error) {
-          if(fromCache) {try {await cache?.delete(url.href);}catch{}}
+          if(fromCache) {try {await deleteCachedModel(cache,url.href,spec);}catch{}}
           throw error;
         } finally { await reader.cancel().catch(() => {}); }
       } else bytes = new Uint8Array(await response.arrayBuffer());
       const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(x=>x.toString(16).padStart(2,'0')).join('');
       if (bytes.length !== spec.bytes || digest !== spec.sha256) {
-        await cache?.delete(url.href);
+        await deleteCachedModel(cache,url.href,spec);
         throw new Error(`${id}: model checksum does not match the pinned manifest`);
       }
       if (!fromCache) {
-        try { await cache?.put(url.href,new Response(bytes, {headers:{'Content-Type':'application/octet-stream'}})); } catch { /* Quota does not prevent local inference. */ }
+        try { await cacheModel(cache,url.href,spec,bytes); } catch { /* Quota does not prevent local inference. */ }
       }
       const recognizer = await runtime.loadModel(bytes,settings.backend);
+      loadedModels.set(id, recognizer);
       reportBackend(id,recognizer);
       return recognizer;
     })();
@@ -123,7 +131,10 @@ export function startWorker(options = {}) {
               const profile = await choices();
               const recognizer = await model(isFinal ? profile.final : profile.draft);
               const began = performance.now();
-              const text = (await transcribe(recognizer, job.samples)).trim();
+              const text = (await transcribe(recognizer, job.samples, {
+                key: `${r.sequence}:${phrase}`, isFinal, audioSamples: job.audioSamples,
+              })).trim();
+              if (r.cancelled) recognizer.resetStream();
               reportBackend(isFinal ? profile.final : profile.draft,recognizer);
               // Leave at least as much time for capture/VAD as the preceding preview
               // consumed. Faster GPUs retain the configured audio-time cadence.
@@ -165,7 +176,10 @@ export function startWorker(options = {}) {
         } catch (error) { send({type:'error',id:clip.id,message:describe(error)}); }
         finally {activeClip=false;}
       }
-    } finally { running = false; }
+    } finally {
+      running = false;
+      if (!recording) for (const recognizer of loadedModels.values()) recognizer.resetStream();
+    }
   }
   self.onmessage = async ({data:m}) => {
     if (workerOwner.handleMessage(m)) return;
@@ -190,7 +204,7 @@ export function startWorker(options = {}) {
         await preload(); send({type:'loaded',id:m.id});
       } else if (m.type === 'start') {
         if (recording || activeClip || clipQueue.length) throw new Error('A transcription is already active.');
-        recording = {id:m.session,session:new runtime.DictationSession({...settings.session,...m.config}),stopping:false,cancelled:false,previewNotBefore:0};
+        recording = {id:m.session,sequence:++recordingSequence,session:new runtime.DictationSession({...settings.session,...m.config}),stopping:false,cancelled:false,previewNotBefore:0};
         send({type:'started',id:m.id,session:m.session});
       } else if (m.type === 'audio' && recording?.id === m.session) {
         const r = recording;
@@ -204,6 +218,7 @@ export function startWorker(options = {}) {
         const old = recording; recording = null; old.cancelled = true; old.session.cancel();
         // A running job owns a copied audio buffer; session has no borrowed async state.
         dispose(old);
+        if (!running) for (const recognizer of loadedModels.values()) recognizer.resetStream();
       } else if (m.type === 'transcribe') {
         if (recording) throw new Error('Finish dictation before submitting a clip.');
         if (!(m.samples instanceof Float32Array) || m.samples.length > 600*16000 || !m.samples.length) throw new Error('Clip must be 16 kHz mono PCM, up to 10 minutes.');

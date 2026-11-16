@@ -48,6 +48,12 @@ jobs:
         run: node tests/browser-smoke.mjs --cpu-only --root "$RUNNER_TEMP/speechworks" --fixture "$RUNNER_TEMP/models/jfk.wav"
       - name: Real speech detection regression
         run: SPEECHWORKS_TEST_AUDIO="$RUNNER_TEMP/models/jfk.wav" cargo test --locked -p speechworks-web --test real_vad -- --ignored --nocapture
+      - name: Verify streaming reference fixtures
+        run: node tools/prepare-streaming-fixtures.mjs "$RUNNER_TEMP/models"
+      - name: Native streaming reference, interleaving and long-phrase acceptance
+        run: SPEECHWORKS_TEST_STREAMING_MODELS="$RUNNER_TEMP/models" cargo test --release --locked -p speechworks-inference cpu_streaming_matches_reference -- --ignored --nocapture
+      - name: Streaming Medium in single-thread browser CPU
+        run: node tests/browser-streaming.mjs --root "$RUNNER_TEMP/speechworks" --fixture "$RUNNER_TEMP/models/jfk.wav" --models streaming-medium --output test-results/streaming-plain.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -77,7 +83,9 @@ jobs:
           curl --fail --location --output "$RUNNER_TEMP/models/jfk.wav" https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav
           echo "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e  $RUNNER_TEMP/models/jfk.wav" | sha256sum --check
       - name: Isolated and non-isolated client lifecycle acceptance
-        run: node tests/browser-lifecycle.mjs --root "$RUNNER_TEMP/speechworks" --fixture "$RUNNER_TEMP/models/jfk.wav" --output test-results/browser-lifecycle.json
+        run: node tests/browser-lifecycle.mjs --root "$RUNNER_TEMP/speechworks" --fixture "$RUNNER_TEMP/models/jfk.wav" --model streaming-medium --output test-results/browser-lifecycle.json
+      - name: Streaming Medium in four-thread browser CPU
+        run: node tests/browser-streaming.mjs --root "$RUNNER_TEMP/speechworks" --fixture "$RUNNER_TEMP/models/jfk.wav" --models streaming-medium --variant threaded --threads 4 --output test-results/streaming-threaded.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

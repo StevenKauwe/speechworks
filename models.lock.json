@@ -1,8 +1,20 @@
 {
   "schema": 1,
   "sampleRate": 16000,
-  "defaults": {"draft": "base", "final": "base"},
+  "defaults": {"draft": "streaming-medium", "final": "streaming-medium"},
   "models": {
+    "streaming-medium": {
+      "architecture": "moonshine_streaming", "license": "MIT",
+      "source": "https://huggingface.co/handy-computer/moonshine-streaming-medium-gguf/resolve/56302cde2ae162d1357a833d91775bcd06e91e1b/moonshine-streaming-medium-Q8_0.gguf",
+      "sha256": "f7c9564249b508f6012927ec4f9e536087da53a7047f858ca9975bea5f75299e",
+      "bytes": 295793568
+    },
+    "streaming-small": {
+      "architecture": "moonshine_streaming", "license": "MIT",
+      "source": "https://huggingface.co/handy-computer/moonshine-streaming-small-gguf/resolve/e53f28b0cb90308390c852068b950a1aadd238b0/moonshine-streaming-small-Q8_0.gguf",
+      "sha256": "d03670f69629b649085d0f44a63d97668b4119117cc9611a4e4ad94341713dfc",
+      "bytes": 198506848
+    },
     "tiny": {
       "architecture": "moonshine", "license": "MIT",
       "source": "https://huggingface.co/handy-computer/moonshine-tiny-gguf/resolve/c71a93b8f1cb2b7f7336f31bb54bc96960c16f41/moonshine-tiny-Q8_0.gguf",

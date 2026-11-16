@@ -41,8 +41,9 @@ const server=http.createServer(async(req,res)=>{
     const route=new URL(req.url,'http://localhost').pathname;
     if(route==='/__harness.html') {res.setHeader('Content-Type','text/html');res.end('<!doctype html><meta charset="utf-8"><title>Speechworks browser acceptance</title><p>Testing local speech recognition.</p>');return;}
     if(route==='/__bad-models.json') {
-      const bad=structuredClone(manifest);const id=bad.defaults.final;
-      bad.models[id].sha256='0'.repeat(64);res.setHeader('Content-Type','application/json');res.end(JSON.stringify(bad));return;
+      const bad=structuredClone(manifest);
+      for (const model of Object.values(bad.models)) model.sha256='0'.repeat(64);
+      res.setHeader('Content-Type','application/json');res.end(JSON.stringify(bad));return;
     }
     const target=route==='/__jfk.wav'?fixture:path.resolve(root,'.'+decodeURIComponent(route));
     if(target!==fixture && !target.startsWith(root+path.sep)) {res.writeHead(403);res.end();return;}

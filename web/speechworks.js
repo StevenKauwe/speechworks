@@ -1,5 +1,6 @@
 import {Transcript} from './transcript.js';
 import {createPoolOwner} from './pool-owner.js';
+import {hasCachedModel} from './model-cache.js';
 
 /** Local dictation. Models, backend and phrase policy are application config.
  * Audio is sent only to a local Web Worker. No network transcription fallback. */
@@ -107,7 +108,7 @@ export function createDictation(options = {}) {
       const manifest = await response.json(); const cache = await caches.open('speechworks-models-v1');
       const profile = {...manifest.defaults, ...options.models};
       const ids = options.session?.previews === false ? [profile.final] : [profile.final, profile.draft];
-      return (await Promise.all(ids.map(id => cache.match(new URL(manifest.models[id].url, manifestUrl).href)))).every(Boolean);
+      return (await Promise.all(ids.map(id => hasCachedModel(cache,new URL(manifest.models[id].url,manifestUrl).href,manifest.models[id])))).every(Boolean);
     } catch { return false; }
   }
   async function record({onText = () => {}, onError = () => {}, signal, session = {}} = {}) {

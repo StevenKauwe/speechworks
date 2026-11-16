@@ -16,7 +16,7 @@ use crate::transformer::Config;
 type Norm = (Vec<f32>, Vec<f32>);
 
 /// A LayerNorm `{name}.weight`, with `.bias` when `bias`, else zeros.
-fn norm(g: &Gguf, name: &str, d: usize, bias: bool) -> Result<Norm> {
+pub(crate) fn norm(g: &Gguf, name: &str, d: usize, bias: bool) -> Result<Norm> {
     let t = |p: &str| g.tensor(&format!("{name}.{p}"), &[d])?.to_f32();
     Ok((t("weight")?, if bias { t("bias")? } else { vec![0.0; d] }))
 }
@@ -46,7 +46,7 @@ fn stacked(g: &Gguf, prefix: &str, names: &[&str], d: usize, bias: bool) -> Resu
 }
 
 /// `name`, `dims` (ggml order), with its bias when `bias`.
-fn linear(g: &Gguf, name: &str, dims: &[usize], bias: bool) -> Result<Linear> {
+pub(crate) fn linear(g: &Gguf, name: &str, dims: &[usize], bias: bool) -> Result<Linear> {
     let b = match bias {
         true => g
             .tensor(&format!("{name}.bias"), &dims[dims.len() - 1..])?
@@ -133,6 +133,7 @@ pub struct Decoder {
     norm: Norm,
     /// The token embedding, also the output layer.
     embed: Linear,
+    head: Option<Linear>,
     /// Learned positions `[context][d]`, empty with rotary dims.
     positions: Vec<f32>,
 }
@@ -156,6 +157,7 @@ pub struct Cache {
     own: Vec<Vec<f32>>,
     cross: Vec<Vec<f32>>,
     frames: usize,
+    capacity: usize,
 }
 
 impl Decoder {
@@ -179,6 +181,11 @@ impl Decoder {
         };
         let layers = parallel(cfg.layers, layers)?;
         let embed = linear(g, "dec.token_embd", &[d, vocab], false)?;
+        let head = if g.get::<&str>("general.architecture")? == "moonshine_streaming" {
+            Some(linear(g, "dec.lm_head", &[d, vocab], false)?)
+        } else {
+            None
+        };
         let positions = match cfg.rot {
             0 => g.tensor("dec.pos_emb.weight", &[d, context])?.to_f32()?,
             _ => Vec::new(),
@@ -187,6 +194,7 @@ impl Decoder {
             layers,
             norm: norm(g, "dec.final_norm", d, bias)?,
             embed,
+            head,
             positions,
             vocab,
             context,
@@ -201,7 +209,9 @@ impl Decoder {
         let mut kv = vec![0.0; t * 2 * d];
         let cross = (self.layers.iter())
             .map(|l| {
-                gemm(enc, &l.cross_kv, &mut kv, t, Epilogue::Bias);
+                if t > 0 {
+                    gemm(enc, &l.cross_kv, &mut kv, t, Epilogue::Bias);
+                }
                 let mut cache = vec![0.0; t * 2 * d];
                 self.pack(&kv, &mut cache, t, 0);
                 cache
@@ -214,7 +224,38 @@ impl Decoder {
             own,
             cross,
             frames: t,
+            capacity: t,
         }
+    }
+
+    /// Project only newly finalized encoder rows. Repack prior cross K/V only
+    /// when capacity grows; token decoding starts from BOS after each update
+    /// because the cross-attention context has changed.
+    pub fn append_cross(&self, cache: &mut Cache, enc: &[f32], rows: usize) {
+        if rows == 0 {
+            return;
+        }
+        let d = self.cfg.d;
+        let hd = self.cfg.head_dim();
+        let needed = cache.frames + rows;
+        if needed > cache.capacity {
+            let capacity = needed.next_power_of_two();
+            for cross in &mut cache.cross {
+                let mut grown = vec![0.0; capacity * 2 * d];
+                for h in 0..2 * self.cfg.heads {
+                    grown[h * capacity * hd..][..cache.frames * hd]
+                        .copy_from_slice(&cross[h * cache.capacity * hd..][..cache.frames * hd]);
+                }
+                *cross = grown;
+            }
+            cache.capacity = capacity;
+        }
+        let mut kv = vec![0.0; rows * 2 * d];
+        for (layer, cross) in self.layers.iter().zip(&mut cache.cross) {
+            gemm(enc, &layer.cross_kv, &mut kv, rows, Epilogue::Bias);
+            self.pack(&kv, cross, cache.capacity, cache.frames);
+        }
+        cache.frames = needed;
     }
 
     /// Rows `[k | v]` of `kv` into `cache` (of `cols` positions) at positions `col..`, rounded to
@@ -258,7 +299,7 @@ impl Decoder {
             gemv(&att, &l.self_out, &mut x, Epilogue::Residual(1.0));
             layer_norm(&x, n(&l.norm_cross), &mut y, None);
             gemv(&y, &l.cross_q, &mut qkv[..d], Epilogue::Bias);
-            attend(&qkv[..d], cross, c.frames, c.frames, &mut att, heads);
+            attend(&qkv[..d], cross, c.capacity, c.frames, &mut att, heads);
             gemv(&att, &l.cross_out, &mut x, Epilogue::Residual(1.0));
             layer_norm(&x, n(&l.norm_ffn), &mut y, None);
             gemv(
@@ -282,7 +323,12 @@ impl Decoder {
 
         layer_norm(&x, n(&self.norm), &mut y, None);
         let mut logits = vec![0.0; self.vocab];
-        gemv(&y, &self.embed, &mut logits, Epilogue::Bias);
+        gemv(
+            &y,
+            self.head.as_ref().unwrap_or(&self.embed),
+            &mut logits,
+            Epilogue::Bias,
+        );
         logits
     }
 }
