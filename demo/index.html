@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Try Speechworks: private, local speech to text in your browser, powered by Rust and optional WebGPU acceleration.">
+  <meta name="theme-color" content="#f6f7f3">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; img-src 'self'; media-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <title>Speechworks — a space to think out loud</title>
+  <link rel="icon" href="./mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./demo.css">
+  <script type="module" src="./demo.js"></script>
+</head>
+<body data-state="idle">
+  <a class="skip-link" href="#workspace">Skip to dictation</a>
+  <div class="shell">
+    <header class="site-header">
+      <a class="brand" href="./" aria-label="Speechworks home"><img src="./mark.svg" width="34" height="34" alt="">speechworks<span class="demo-tag">playground</span></a>
+      <a class="source-link" href="https://github.com/StevenKauwe/speechworks">View on GitHub <span aria-hidden="true">↗</span></a>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="title">
+        <p class="eyebrow"><span class="privacy-dot" aria-hidden="true"></span> YOUR VOICE. YOUR DEVICE.</p>
+        <h1 id="title">A space to think<br><span>out loud.</span></h1>
+        <p class="intro-copy">Turn a thought into text. Local speech recognition, powered by Rust.<br class="desktop-break"> No account, no audio uploads. Just you and your browser.</p>
+      </section>
+
+      <section id="workspace" class="workspace" aria-label="Try speech recognition" tabindex="-1">
+        <div class="writing-area">
+          <div class="recorder-toolbar">
+            <div class="record-actions">
+              <button id="record" class="button primary" type="button" disabled>
+                <svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M6 11v1a6 6 0 0 0 12 0v-1M12 18v3m-3 0h6"/></svg>
+                <span id="record-label">Start dictating</span>
+              </button>
+              <button id="sample" class="button secondary" type="button" disabled><span aria-hidden="true">▷</span> Try a sample</button>
+              <button id="cancel" class="button quiet" type="button" hidden>Cancel</button>
+            </div>
+            <div class="capture-readout"><div id="level" class="level" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span id="duration" class="duration" aria-label="Recording duration">00:00</span></div>
+          </div>
+
+          <div class="status-line"><span id="status-dot" class="status-dot" aria-hidden="true"></span><p id="status" role="status">Getting the playground ready…</p></div>
+          <div id="loading" class="loading" hidden><label for="download-progress" id="loading-label">Preparing model…</label><progress id="download-progress" max="1" value="0"></progress></div>
+          <div id="error" class="error" role="alert" hidden><p id="error-message"></p><button id="retry" class="text-button" type="button" hidden>Reload playground</button></div>
+
+          <div class="document">
+            <label class="document-label" for="transcript">YOUR TRANSCRIPT</label>
+            <textarea id="transcript" placeholder="Say what’s on your mind…" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="edit-hint"></textarea>
+            <div id="live-container" class="live-container" hidden><span class="live-label">LIVE PREVIEW</span><p id="live-text"></p></div>
+          </div>
+          <div class="document-footer">
+            <p id="edit-hint">Edit your words when you’re done.</p>
+            <div class="document-tools"><span id="word-count">0 words</span><button id="clear" class="text-button" type="button" disabled>Clear</button><button id="copy" class="text-button" type="button" disabled>Copy text</button></div>
+          </div>
+        </div>
+
+        <aside class="settings" aria-label="Recognition settings">
+          <div class="settings-heading"><h2>Make it yours</h2><span>01 / SETUP</span></div>
+          <label class="field-label" for="model">Model</label>
+          <select id="model" disabled><option>Loading models…</option></select>
+          <p id="model-hint" class="field-hint">English speech recognition.</p>
+          <label class="field-label" for="backend">Run on</label>
+          <select id="backend" disabled><option value="auto">Automatic · GPU when available</option><option value="gpu">GPU · WebGPU required</option><option value="cpu">CPU · WebAssembly</option></select>
+          <p class="field-hint">Automatic falls back to your CPU if needed.</p>
+          <label class="toggle-row" for="previews"><span><strong>Live previews</strong><small>See words as you speak</small></span><input id="previews" type="checkbox" checked disabled><span class="toggle-track" aria-hidden="true"></span></label>
+
+          <div class="engine-info">
+            <div class="settings-heading"><h2>Under the hood</h2><span>02 / ENGINE</span></div>
+            <dl><div><dt>Processing</dt><dd>On your device</dd></div><div><dt>Backend</dt><dd id="device">Detected on first use</dd></div><div><dt>Model size</dt><dd id="model-size">—</dd></div></dl>
+            <p id="fallback" class="fallback" hidden></p>
+            <p id="cache-note" class="cache-note">The selected model downloads on first use. Your browser can cache it for next time.</p>
+          </div>
+          <details class="sample-details"><summary>About the sample</summary><p>An 11-second excerpt from John F. Kennedy’s 1961 inaugural address. Public-domain audio, included with the demo.</p><audio id="sample-audio" controls preload="none" src="./sample.wav" aria-label="John F. Kennedy speech sample"></audio><a href="https://github.com/ggml-org/whisper.cpp/blob/b0a11594aec50892a02cd8d129eee2dfe93a8bb8/samples/jfk.wav">Sample source ↗</a></details>
+        </aside>
+      </section>
+
+      <div class="below-workspace"><p><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="4.5" y="8.5" width="11" height="8" rx="2"/><path d="M7 8.5V6a3 3 0 0 1 6 0v2.5"/></svg> Your audio and transcript stay in this tab. Nothing is sent for transcription.</p><p id="timing" role="status"></p></div>
+      <noscript><p class="error">This demo needs JavaScript to run the Rust speech engine in your browser.</p></noscript>
+    </main>
+
+    <footer class="site-footer"><p>Small interface. All-local engine.</p><nav aria-label="Project links"><a href="https://github.com/StevenKauwe/speechworks#browser-applications">Build with Speechworks</a><a href="./runtime/LICENSE">MIT licensed</a><a href="./runtime/THIRD_PARTY_NOTICES.md">Credits</a></nav></footer>
+  </div>
+</body>
+</html>

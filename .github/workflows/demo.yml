@@ -1,0 +1,64 @@
+name: Demo
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/speechworks-models
+          key: demo-models-${{ hashFiles('models.lock.json', 'tools/build-demo.mjs') }}
+      - name: Build demo, verify weights and sample
+        run: npm run build:demo -- --model-dir "$RUNNER_TEMP/speechworks-models"
+      - name: Test the real demo before publishing
+        run: npm run test:demo
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: demo-browser-evidence
+          path: test-results/
+      - uses: actions/configure-pages@v5
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+      - uses: actions/upload-pages-artifact@v4
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        with:
+          path: _site
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish the demo
+        id: deployment
+        uses: actions/deploy-pages@v4

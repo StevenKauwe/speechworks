@@ -4,6 +4,11 @@ Local dictation in Rust: editable live previews, stable final phrases, optional
 GPU acceleration, and the same engine in native applications and browser workers.
 Built to be shared by Agency Platform and CrabScape.
 
+**[Try the live playground →](https://stevenkauwe.github.io/speechworks/)**
+Use your microphone or a sample clip, switch between base and tiny, and compare
+automatic GPU acceleration with CPU inference. No account or installation;
+recognition runs in your browser. The first use downloads the selected model.
+
 The dictation behavior is independent of the model. Applications choose draft
 and final models, backend, pause thresholds, preview cadence, phrase limits, and
 memory budgets. The included inference backend supports Moonshine tiny and base
@@ -125,6 +130,34 @@ a stateful windowed-sinc resampler. Stop flushes the remaining microphone block
 and final phrase. The audio queue is bounded; overload is reported explicitly.
 Downloads and cached models are checked against the pinned checksum before use.
 Offline transcription works once application assets and selected weights are cached.
+
+## Demo page
+
+The [playground](https://stevenkauwe.github.io/speechworks/) is built from `demo/`
+and published from this repository with GitHub Pages. It uses the same browser
+API and pinned assets as consumer applications. Models, WASM, and the public-domain
+sample are served from the same site; no transcription service or analytics is used.
+Live previews are optional, final text is editable, and the displayed backend and
+sample transcription time come from the running engine.
+
+To run it locally (Node 22+, plus the browser build prerequisites above):
+
+```sh
+npm run build:demo
+python3 -m http.server 8080 --bind 127.0.0.1 --directory _site
+# Open http://127.0.0.1:8080
+```
+
+Use `npm run build:demo -- --model-dir /path/to/model-cache` to reuse downloaded
+weights. Only demo source is committed; the Pages workflow builds and verifies
+the published runtime and models. GitHub Pages does not supply cross-origin
+isolation headers, so this demo ships the compatible serial CPU variants and
+uses WebGPU when available. Shared-memory CPU workers remain available to apps
+with suitable hosting; see [the threaded build guide](docs/wasm-threads.md).
+
+The Pages build runs `npm run test:demo` against real models before deployment,
+including sample transcription, microphone stop/cancel, error recovery, and a
+mobile layout check. Use `-- --root /path/to/demo` to test another built directory.
 
 ## Tests
 
