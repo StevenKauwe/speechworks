@@ -12,8 +12,10 @@ mod error;
 mod gguf;
 mod gpu;
 mod moonshine;
+mod profile;
 mod runtime;
 mod sentencepiece;
+mod streaming;
 mod transformer;
 mod whisper {
     pub mod tokenizer;
@@ -31,6 +33,9 @@ pub use error::{Error, Result};
 pub use gpu::{Api, Device, DeviceKind, Kernels};
 use runtime::Target;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static MODEL_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Backend {
@@ -73,12 +78,91 @@ pub struct Token {
 }
 
 pub struct Model {
+    id: u64,
     source: gguf::Gguf,
-    model: Mutex<moonshine::Moonshine>,
+    model: Mutex<Family>,
     options: LoadOptions,
     fallback: Mutex<Option<String>>,
 }
+
+/// State of one phrase. Feed fresh 16-kHz PCM with `Model::transcribe_chunk`;
+/// pass `final_chunk=true` once to flush look-ahead and the last partial frame.
+/// Partial transcripts may change. A finalized stream cannot accept more audio.
+/// Keep a separate state for every concurrent phrase; model weights are shared.
+#[derive(Default)]
+pub struct StreamState {
+    model_id: Option<u64>,
+    pcm: Vec<f32>,
+    streaming: streaming::State,
+    finished: bool,
+}
+impl StreamState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn samples(&self) -> usize {
+        self.pcm.len()
+    }
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+    /// Whether a growing phrase still includes exactly the audio already fed.
+    /// Useful when a phrase splitter can move a final boundary behind a preview.
+    pub fn matches_prefix(&self, samples: &[f32]) -> bool {
+        samples.starts_with(&self.pcm)
+    }
+}
+
+enum Family {
+    Moonshine(moonshine::Moonshine),
+    Streaming(streaming::Streaming),
+}
+impl Family {
+    async fn load(g: &gguf::Gguf, target: Target, max_samples: usize) -> Result<Self> {
+        match g.get::<&str>("general.architecture")? {
+            "moonshine" => Ok(Self::Moonshine(
+                moonshine::Moonshine::load(g, target).await?,
+            )),
+            "moonshine_streaming" => Ok(Self::Streaming(
+                streaming::Streaming::load(g, target, max_samples).await?,
+            )),
+            name => Err(Error::Model(format!(
+                "unsupported architecture {name:?}; expected moonshine or moonshine_streaming"
+            ))),
+        }
+    }
+    fn device(&self) -> &Device {
+        match self {
+            Self::Moonshine(m) => m.device(),
+            Self::Streaming(m) => m.device(),
+        }
+    }
+    fn working_bytes(&self, n: usize) -> usize {
+        match self {
+            Self::Moonshine(m) => m.working_bytes(n),
+            Self::Streaming(m) => m.working_bytes(n),
+        }
+    }
+    async fn transcribe(&self, samples: &[f32]) -> Result<Transcript> {
+        match self {
+            Self::Moonshine(m) => m.transcribe(samples).await,
+            Self::Streaming(m) => m.transcribe(samples).await,
+        }
+    }
+    #[cfg(test)]
+    fn destroy_gpu_for_test(&self) {
+        match self {
+            Self::Moonshine(m) => m.destroy_gpu_for_test(),
+            Self::Streaming(m) => m.destroy_gpu_for_test(),
+        }
+    }
+}
 impl Model {
+    pub fn is_streaming(&self) -> bool {
+        self.source
+            .get::<&str>("general.architecture")
+            .is_ok_and(|name| name == "moonshine_streaming")
+    }
     pub async fn from_bytes(bytes: Vec<u8>, backend: Backend) -> Result<Self> {
         Self::from_bytes_with(
             bytes,
@@ -99,26 +183,22 @@ impl Model {
             ));
         }
         let source = gguf::Gguf::from_bytes(bytes)?;
-        let architecture = source.get::<&str>("general.architecture")?;
-        if architecture != "moonshine" {
-            return Err(Error::Model(format!(
-                "unsupported architecture {architecture:?}; this build supports moonshine"
-            )));
-        }
         let target = if options.backend == Backend::Cpu {
             Target::Cpu
         } else {
             Target::Gpu
         };
-        let (model, fallback) = match moonshine::Moonshine::load(&source, target).await {
+        let (model, fallback) = match Family::load(&source, target, options.max_audio_samples).await
+        {
             Ok(model) => (model, None),
             Err(error) if options.backend == Backend::Auto && error.is_fatal() => (
-                moonshine::Moonshine::load(&source, Target::Cpu).await?,
+                Family::load(&source, Target::Cpu, options.max_audio_samples).await?,
                 Some(error.to_string()),
             ),
             Err(error) => return Err(error),
         };
         Ok(Self {
+            id: MODEL_ID.fetch_add(1, Ordering::Relaxed),
             source,
             model: Mutex::new(model),
             options,
@@ -163,7 +243,8 @@ impl Model {
         match model.transcribe(samples).await {
             Err(error) if self.options.backend == Backend::Auto && error.is_fatal() => {
                 let reason = error.to_string();
-                *model = moonshine::Moonshine::load(&self.source, Target::Cpu).await?;
+                *model =
+                    Family::load(&self.source, Target::Cpu, self.options.max_audio_samples).await?;
                 *self
                     .fallback
                     .lock()
@@ -171,6 +252,94 @@ impl Model {
                 model.transcribe(samples).await
             }
             result => result,
+        }
+    }
+
+    /// Append audio and return the current hypothesis. Streaming models cache
+    /// every finalized encoder row and cross-attention projection. Original
+    /// Moonshine models retain their bounded whole-phrase preview behavior.
+    /// `Auto` replays the accumulated phrase on CPU after a GPU failure.
+    pub async fn transcribe_chunk(
+        &self,
+        state: &mut StreamState,
+        chunk: &[f32],
+        final_chunk: bool,
+    ) -> Result<Transcript> {
+        if state.finished {
+            return Err(Error::Audio("stream is already finalized".into()));
+        }
+        if state.model_id.is_some_and(|id| id != self.id) {
+            return Err(Error::Audio("stream belongs to a different model".into()));
+        }
+        let samples = state
+            .pcm
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| Error::Audio("audio size overflow".into()))?;
+        if samples > self.options.max_audio_samples {
+            return Err(Error::Audio(
+                "stream exceeds the configured audio limit".into(),
+            ));
+        }
+        if chunk.iter().any(|x| !x.is_finite() || x.abs() > 1.0) {
+            return Err(Error::Audio(
+                "expected finite mono PCM samples in [-1, 1] at 16 kHz".into(),
+            ));
+        }
+        let mut model = self.model.try_lock().map_err(|_| Error::Busy)?;
+        let needed = model.working_bytes(samples);
+        if needed > self.options.max_work_bytes {
+            return Err(Error::MemoryBudget {
+                needed,
+                budget: self.options.max_work_bytes,
+            });
+        }
+        state.model_id = Some(self.id);
+        state.pcm.extend_from_slice(chunk);
+        let result = match &*model {
+            Family::Moonshine(m) => m.transcribe(&state.pcm).await,
+            Family::Streaming(m) => {
+                m.update(&mut state.streaming, &state.pcm, final_chunk)
+                    .await
+            }
+        };
+        let result = match result {
+            Err(error) if self.options.backend == Backend::Auto && error.is_fatal() => {
+                match Family::load(&self.source, Target::Cpu, self.options.max_audio_samples).await
+                {
+                    Ok(cpu) => {
+                        *model = cpu;
+                        *self
+                            .fallback
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(error.to_string());
+                        state.streaming = streaming::State::default();
+                        match &*model {
+                            Family::Moonshine(m) => m.transcribe(&state.pcm).await,
+                            Family::Streaming(m) => {
+                                m.update(&mut state.streaming, &state.pcm, final_chunk)
+                                    .await
+                            }
+                        }
+                    }
+                    Err(load_error) => Err(load_error),
+                }
+            }
+            result => result,
+        };
+        match result {
+            Ok(text) => {
+                state.finished = final_chunk;
+                Ok(text)
+            }
+            Err(error) => {
+                // A caller may retry the same chunk after a transient failure.
+                // Invalidate mutated caches and roll back only this append.
+                state.pcm.truncate(samples - chunk.len());
+                state.streaming = streaming::State::default();
+                Err(error)
+            }
         }
     }
 }

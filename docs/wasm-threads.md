@@ -98,7 +98,7 @@ changing the serial build. `SPEECHWORKS_THREAD_DEST` and
 output is plain SIMD. The helper uses pinned nightly Rust 1.102.0,
 wasm-bindgen 0.2.129, wasm-bindgen-rayon 1.3.0 and locked Rayon dependencies. It
 rebuilds `std` with atomics; a prebuilt stable WASM standard library is not
-interchangeable. Shared imported memory has a 1 GiB maximum, not an up-front
+interchangeable. Shared imported memory has a 2 GiB maximum, not an up-front
 allocation. All models within a module share its pool.
 
 `tools/wasm-rayon-worker.js` adapts the Apache-2.0 helper from

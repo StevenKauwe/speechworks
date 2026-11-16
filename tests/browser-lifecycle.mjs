@@ -12,7 +12,9 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const args=Object.fromEntries(process.argv.slice(2).flatMap((v,i,a)=>v.startsWith('--')?[[v,a[i+1]]]:[]));
 for(const k of ['--root','--fixture','--output'])assert.ok(args[k],`${k} required`);
 const root=path.resolve(args['--root']), fixture=path.resolve(args['--fixture']);
+const selectedModel=args['--model'] || 'base';
 const report={methodology:'Actual createDictation API in fresh isolated Chrome contexts. UI Worker handles instrumented; CDP worker targets observed after teardown. Fault injections are explicit, test-local and not throughput measurements.',cases:[],errors:[]};
+report.model=selectedModel;
 report.environment={platform:os.platform(),architecture:os.arch(),cpu:os.cpus()[0]?.model};
 report.artifactSha256={};
 for(const file of ['speechworks.js','pool-owner.js','worker.js','runtime-loader.js','runtime-config.js','threaded/thread-pool.js','threaded/speechworks_web_bg.wasm'])report.artifactSha256[file]=createHash('sha256').update(await fs.readFile(path.join(root,file))).digest('hex');
@@ -34,7 +36,7 @@ try{
  cdp.on('Target.targetDestroyed',({targetId:id})=>{if(workerIds.has(id))cdpEvents.push({event:'destroyed',id});});
  await cdp.send('Target.setDiscoverTargets',{discover:true});
  const targets=async()=> (await cdp.send('Target.getTargets')).targetInfos.filter(t=>t.type==='worker').map(t=>({id:t.targetId,url:t.url}));
- for(const spec of [{name:'auto-repeat-recreate',threads:'auto'},{name:'explicit-two',threads:2},{name:'explicit-four',threads:4},{name:'nonisolated',threads:4,isolated:false},{name:'destroy-inference',threads:4},{name:'destroy-partial-startup',threads:4},{name:'mixed-ready-failure',threads:4},{name:'late-fatal',threads:4},{name:'watchdog-stall',threads:4}]){
+ for(const spec of [{name:'auto-repeat-recreate',threads:'auto'},{name:'explicit-two',threads:2},{name:'explicit-four',threads:4},{name:'dual-models',threads:4},{name:'nonisolated',threads:4,isolated:false},{name:'destroy-inference',threads:4},{name:'destroy-partial-startup',threads:4},{name:'mixed-ready-failure',threads:4},{name:'late-fatal',threads:4},{name:'watchdog-stall',threads:4}].filter(spec=>!args['--only'] || args['--only'].split(',').includes(spec.name))){
   const cdpStart=cdpEvents.length;const context=await browser.newContext();const page=await context.newPage();const requests=[],errors=[];const s=servers[spec.isolated===false?1:0];const origin=`http://127.0.0.1:${s.address().port}`;
   page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>requests.push(r.url()));
   await context.route('**/*',r=>r.request().url().startsWith(origin+'/')?r.continue():r.abort());
@@ -72,7 +74,7 @@ try{
    const bytes=await(await fetch('/fixture.wav')).arrayBuffer();const v=new DataView(bytes);let pcm;
    for(let at=12;at+8<=bytes.byteLength;){const size=v.getUint32(at+4,true);if(String.fromCharCode(...new Uint8Array(bytes,at,4))==='data'){pcm=new Float32Array(size/2);for(let i=0;i<pcm.length;i++)pcm[i]=v.getInt16(at+8+2*i,true)/32768;}at+=8+size+(size&1);}
    if(!pcm)throw new Error('Missing fixture PCM');
-   const make=()=>{engine=createDictation({backend:'cpu',cpuThreads:spec.threads,models:{draft:'base',final:'base'},session:{previews:false}});engine.onStatus(s=>statuses.push(s));};
+   const make=()=>{engine=createDictation({backend:'cpu',cpuThreads:spec.threads,models:{draft:spec.name==='dual-models'?'streaming-small':spec.model,final:spec.model},session:{previews:spec.name==='dual-models'}});engine.onStatus(s=>statuses.push(s));};
    const bounded=p=>Promise.race([p,new Promise((_,reject)=>nativeTimeout(()=>reject(new Error('Acceptance operation timeout')),60000))]);
    const texts=[];let rejected=null;
    try{
@@ -88,7 +90,7 @@ try{
     }
    }finally{engine?.destroy();clearInterval(heartbeat);}
    return {records,events,statuses,texts,rejected,injectedAction:action,hardwareConcurrency:navigator.hardwareConcurrency,isolated:crossOriginIsolated,heartbeat:{computeSamples:computeGaps.length,maxComputeGapMs:Math.max(0,...computeGaps),samples:gaps.length,maxGapMs:Math.max(0,...gaps),p95GapMs:[...gaps].sort((a,b)=>a-b)[Math.floor(gaps.length*.95)]}};
-  },spec);
+  },{...spec,model:selectedModel});
   let remaining;for(let n=0;n<100;n++){remaining=await targets();const observed=cdpEvents.slice(cdpStart);const created=observed.filter(e=>e.event==='created');const ended=new Set(observed.filter(e=>e.event==='destroyed').map(e=>e.id));if(!remaining.length&&created.every(e=>ended.has(e.id)))break;await new Promise(r=>setTimeout(r,20));}
   const entry={...spec,result,requests:requests.map(u=>u.replace(origin,'')),errors,cdpWorkerEvents:cdpEvents.slice(cdpStart),remainingWorkerTargets:remaining};report.cases.push(entry);
   assert.equal(result.records.filter(r=>!r.terminated).length,0,`${spec.name} handles leaked`);assert.deepEqual(remaining,[],`${spec.name} CDP workers leaked`);const createdTargets=entry.cdpWorkerEvents.filter(e=>e.event==='created');const destroyedTargets=new Set(entry.cdpWorkerEvents.filter(e=>e.event==='destroyed').map(e=>e.id));assert.equal(createdTargets.length,result.records.length,'CDP observed every instrumented worker');assert.ok(createdTargets.every(e=>destroyedTargets.has(e.id)),'CDP confirmed every worker destruction');assert.deepEqual(errors,[]);

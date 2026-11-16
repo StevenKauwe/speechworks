@@ -12,6 +12,7 @@ use crate::error::Result;
 use crate::gguf::Gguf;
 use crate::gpu::{Buffer, Channels, Epilogue, Gpu, Linear, Pass, attend_len};
 
+#[derive(Clone)]
 pub struct Config {
     pub d: usize,
     pub heads: usize,
@@ -146,6 +147,7 @@ pub struct Decoder {
     norm: Channels,
     /// The token embedding, also the output layer (no bias).
     embed: Linear,
+    head: Option<Linear>,
     /// Learned positions `[context][d]`, or one row of zeros with rotary dims.
     positions: Buffer,
 }
@@ -203,6 +205,11 @@ impl Decoder {
         };
         let layers = parallel(cfg.layers, layers)?;
         let embed = gpu.linear(&[g.tensor("dec.token_embd.weight", &[d, vocab])?], &[])?;
+        let head = if g.get::<&str>("general.architecture")? == "moonshine_streaming" {
+            Some(gpu.linear(&[g.tensor("dec.lm_head.weight", &[d, vocab])?], &[])?)
+        } else {
+            None
+        };
         let positions = match cfg.rot {
             0 => g.tensor("dec.pos_emb.weight", &[d, context])?.to_f32()?,
             _ => vec![0.0; d],
@@ -211,6 +218,7 @@ impl Decoder {
             layers,
             norm: norm(gpu, g, "dec.final_norm", d, bias)?,
             embed,
+            head,
             positions: gpu.upload(&positions)?,
             vocab,
             context,
@@ -237,9 +245,30 @@ impl Decoder {
     /// Records the cross-attention K and V of every layer from the encoder output `enc` (`t` rows),
     /// through `scratch` (`t` × 2·d floats).
     pub fn record_cross(&self, p: &mut Pass, b: &Steps, enc: &Buffer, scratch: &Buffer, t: usize) {
+        self.record_cross_append(p, b, enc, scratch, t, t, 0);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_cross_append(
+        &self,
+        p: &mut Pass,
+        b: &Steps,
+        enc: &Buffer,
+        scratch: &Buffer,
+        rows: usize,
+        capacity: usize,
+        start: usize,
+    ) {
         for (l, cache) in self.layers.iter().zip(&b.cross) {
-            p.gemm(enc, &l.cross_kv, scratch, t, Epilogue::Bias);
-            p.pack(scratch, [0, 2 * self.cfg.d], cache, t, self.cfg.d, [t, 0]);
+            p.gemm(enc, &l.cross_kv, scratch, rows, Epilogue::Bias);
+            p.pack(
+                scratch,
+                [0, 2 * self.cfg.d],
+                cache,
+                rows,
+                self.cfg.d,
+                [capacity, start],
+            );
         }
     }
 
@@ -254,6 +283,20 @@ impl Decoder {
         token: (&Buffer, usize),
         pos: usize,
         frames: usize,
+        rope: Option<&Buffer>,
+    ) {
+        self.record_step_capacity(p, b, token, pos, frames, frames, rope);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_step_capacity(
+        &self,
+        p: &mut Pass,
+        b: &Steps,
+        token: (&Buffer, usize),
+        pos: usize,
+        frames: usize,
+        capacity: usize,
         rope: Option<&Buffer>,
     ) {
         let (d, heads, hd, f) = (
@@ -285,7 +328,7 @@ impl Decoder {
             p.gemv(&b.att, &l.self_out, &b.x, Epilogue::Residual(1.0), 0);
             p.layer_norm_row(&b.x, &l.norm_cross, &b.y, d);
             p.gemv(&b.y, &l.cross_q, &b.qkv, Epilogue::Bias, 0);
-            p.attend(&b.qkv, cross, &b.part, &b.att, frames, frames, heads, hd);
+            p.attend(&b.qkv, cross, &b.part, &b.att, frames, capacity, heads, hd);
             p.gemv(&b.att, &l.cross_out, &b.x, Epilogue::Residual(1.0), 0);
             p.layer_norm_row(&b.x, &l.norm_ffn, &b.y, d);
             let act = if self.cfg.gated {
@@ -300,6 +343,12 @@ impl Decoder {
             p.gemv(&b.h, &l.fc2, &b.x, Epilogue::Residual(1.0), 0);
         }
         p.layer_norm_row(&b.x, &self.norm, &b.y, d);
-        p.gemv(&b.y, &self.embed, &b.logits, Epilogue::Bias, 0);
+        p.gemv(
+            &b.y,
+            self.head.as_ref().unwrap_or(&self.embed),
+            &b.logits,
+            Epilogue::Bias,
+            0,
+        );
     }
 }

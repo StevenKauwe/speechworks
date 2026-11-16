@@ -1,0 +1,640 @@
+{
+  "recorded": "2026-11-16",
+  "environment": {
+    "cpu": "Apple M2 Max",
+    "logicalProcessors": 12,
+    "os": "macOS-27.2-arm64-arm-64bit",
+    "rust": "1.99.1",
+    "browser": "Chrome 157.0.8103.78"
+  },
+  "inferenceSourceSha256": "03831a2458898af1c955893cda0d1538efd389735ebc0bc6118786abf23202c4",
+  "nativeBenchmarkSha256": "e41df7464e6d1358db2d291d2c75f6ff11204df8c72760bf69e599d8f7df7de3",
+  "methodology": "Sequential runs; native 3 passes, first discarded, median of remaining 2; browser 2 passes, second reported; 320-ms updates plus final flush. Compute excludes capture, VAD, model download/setup, and 240-ms model look-ahead. Reference is final reported iteration of 5, same GGUF/audio, 12 CPU threads. No WER/general device claim.",
+  "models": {
+    "schema": 1,
+    "sampleRate": 16000,
+    "defaults": {
+      "draft": "streaming-medium",
+      "final": "streaming-medium"
+    },
+    "models": {
+      "streaming-medium": {
+        "architecture": "moonshine_streaming",
+        "license": "MIT",
+        "source": "https://huggingface.co/handy-computer/moonshine-streaming-medium-gguf/resolve/56302cde2ae162d1357a833d91775bcd06e91e1b/moonshine-streaming-medium-Q8_0.gguf",
+        "sha256": "f7c9564249b508f6012927ec4f9e536087da53a7047f858ca9975bea5f75299e",
+        "bytes": 295793568
+      },
+      "streaming-small": {
+        "architecture": "moonshine_streaming",
+        "license": "MIT",
+        "source": "https://huggingface.co/handy-computer/moonshine-streaming-small-gguf/resolve/e53f28b0cb90308390c852068b950a1aadd238b0/moonshine-streaming-small-Q8_0.gguf",
+        "sha256": "d03670f69629b649085d0f44a63d97668b4119117cc9611a4e4ad94341713dfc",
+        "bytes": 198506848
+      },
+      "tiny": {
+        "architecture": "moonshine",
+        "license": "MIT",
+        "source": "https://huggingface.co/handy-computer/moonshine-tiny-gguf/resolve/c71a93b8f1cb2b7f7336f31bb54bc96960c16f41/moonshine-tiny-Q8_0.gguf",
+        "sha256": "2fd348d7b38f97d309cc3ec6848f3f57f537b80244950f07d2637e463f95a3a1",
+        "bytes": 35466912
+      },
+      "base": {
+        "architecture": "moonshine",
+        "license": "MIT",
+        "source": "https://huggingface.co/handy-computer/moonshine-base-gguf/resolve/124f8cf8d3c1c56ad0f6ebc44aaafc0622e62d97/moonshine-base-Q8_0.gguf",
+        "sha256": "7f0027dfd857d310b63a85ef57cadf183da712cc374f85a648f8bc18aaa2efc8",
+        "bytes": 77476480
+      }
+    }
+  },
+  "fixtures": [
+    {
+      "name": "jfk.wav",
+      "sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+      "seconds": 11
+    },
+    {
+      "name": "fleurs-en.wav",
+      "sha256": "7835bd6ffb54ce38a2a9bcde3905ba424faed94d50a474f21a9cbe9209b869df",
+      "seconds": 10.56,
+      "source": "Google FLEURS en_us test id 1904, CC-BY-4.0"
+    }
+  ],
+  "native": {
+    "cpu": {
+      "deviceAndLoad": "device=CPU (NEON, 12 threads) kernels=Cpu load_ms=115.501 audio_ms=11000.000",
+      "runs": [
+        {
+          "run": 0,
+          "offline_ms": 509.111,
+          "stream_compute_ms": 5343.313,
+          "update_p50_ms": 113.416,
+          "update_p95_ms": 234.976,
+          "final_ms": 223.586
+        },
+        {
+          "run": 1,
+          "offline_ms": 501.509,
+          "stream_compute_ms": 5328.875,
+          "update_p50_ms": 115.615,
+          "update_p95_ms": 237.186,
+          "final_ms": 223.958
+        },
+        {
+          "run": 2,
+          "offline_ms": 512.597,
+          "stream_compute_ms": 5358.49,
+          "update_p50_ms": 115.049,
+          "update_p95_ms": 258.771,
+          "final_ms": 219.873
+        }
+      ],
+      "warmMedian": {
+        "offline_ms": 507.053,
+        "stream_compute_ms": 5343.6825,
+        "update_p50_ms": 115.332,
+        "update_p95_ms": 247.9785,
+        "final_ms": 221.9155
+      },
+      "transcript": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+    },
+    "portableGpu": {
+      "deviceAndLoad": "device=Apple M2 Max (Metal, integrated) kernels=Portable load_ms=127.327 audio_ms=11000.000",
+      "runs": [
+        {
+          "run": 0,
+          "offline_ms": 336.194,
+          "stream_compute_ms": 3921.287,
+          "update_p50_ms": 83.839,
+          "update_p95_ms": 159.097,
+          "final_ms": 154.321
+        },
+        {
+          "run": 1,
+          "offline_ms": 312.303,
+          "stream_compute_ms": 3943.014,
+          "update_p50_ms": 85.68,
+          "update_p95_ms": 158.137,
+          "final_ms": 154.066
+        },
+        {
+          "run": 2,
+          "offline_ms": 311.825,
+          "stream_compute_ms": 3949.058,
+          "update_p50_ms": 86.748,
+          "update_p95_ms": 157.464,
+          "final_ms": 154.219
+        }
+      ],
+      "warmMedian": {
+        "offline_ms": 312.06399999999996,
+        "stream_compute_ms": 3946.036,
+        "update_p50_ms": 86.214,
+        "update_p95_ms": 157.8005,
+        "final_ms": 154.14249999999998
+      },
+      "transcript": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+    },
+    "matrixGpu": {
+      "deviceAndLoad": "device=Apple M2 Max (Metal, integrated) kernels=Matrix8 load_ms=139.656 audio_ms=11000.000",
+      "runs": [
+        {
+          "run": 0,
+          "offline_ms": 198.097,
+          "stream_compute_ms": 2955.171,
+          "update_p50_ms": 62.26,
+          "update_p95_ms": 124.133,
+          "final_ms": 124.723
+        },
+        {
+          "run": 1,
+          "offline_ms": 189.251,
+          "stream_compute_ms": 2965.116,
+          "update_p50_ms": 61.227,
+          "update_p95_ms": 135.695,
+          "final_ms": 124.474
+        },
+        {
+          "run": 2,
+          "offline_ms": 191.412,
+          "stream_compute_ms": 2962.782,
+          "update_p50_ms": 61.277,
+          "update_p95_ms": 125.753,
+          "final_ms": 123.885
+        }
+      ],
+      "warmMedian": {
+        "offline_ms": 190.3315,
+        "stream_compute_ms": 2963.949,
+        "update_p50_ms": 61.251999999999995,
+        "update_p95_ms": 130.724,
+        "final_ms": 124.1795
+      },
+      "transcript": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+    }
+  },
+  "reference": {
+    "repository": "https://github.com/handy-computer/transcribe.cpp",
+    "revision": "adfc50210a3f026a655a3e19937d90ef2bf0728c",
+    "runs": 5,
+    "threads": 12,
+    "cpu": {
+      "timings": "timings: load=110.26 ms  mel=0.00 ms  encode=227.70 ms  decode=186.16 ms",
+      "text": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+    },
+    "metal": {
+      "timings": "timings: load=74.95 ms  mel=0.00 ms  encode=39.89 ms  decode=177.22 ms",
+      "text": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+    }
+  },
+  "browser": [
+    {
+      "model": "streaming-medium",
+      "device": "GPU (WebGPU, other)",
+      "variant": "plain",
+      "wasmSha256": "ac0d4036ea6aba9adbe4a2c75053a7885f6c13b3b86fb5fe4c52ec3a5ef78bf6",
+      "loadMs": 207.60000014305115,
+      "offlineMs": [
+        282.09999990463257,
+        235.59999990463257
+      ],
+      "warmPreviewMs": [
+        54,
+        35.799999952316284,
+        34.90000009536743,
+        51,
+        49.799999952316284,
+        49.799999952316284,
+        49.40000009536743,
+        50.40000009536743,
+        50.69999980926514,
+        49.40000009536743,
+        50.90000009536743,
+        66.19999980926514,
+        67,
+        70.5,
+        70.70000004768372,
+        68.70000004768372,
+        67.29999995231628,
+        68.10000014305115,
+        81.09999990463257,
+        67.90000009536743,
+        82.89999985694885,
+        83.5,
+        98.5,
+        93.70000004768372,
+        94.79999995231628,
+        97.20000004768372,
+        316.59999990463257,
+        125.40000009536743,
+        109.20000004768372,
+        123.79999995231628,
+        126.40000009536743,
+        124.09999990463257,
+        127.29999995231628,
+        123.79999995231628,
+        141
+      ],
+      "warmMedianMs": 70.5,
+      "warmP95Ms": 141,
+      "warmFinalMs": 124,
+      "wasmMemoryBytes": 820051968,
+      "rewindAndRestart": true,
+      "recovery": {
+        "text": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+        "device": "CPU (WASM SIMD128, 1 threads)",
+        "reason": "GPU readback: Error occurred when trying to async map a buffer"
+      },
+      "transcript": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+    },
+    {
+      "model": "streaming-medium",
+      "device": "CPU (WASM SIMD128 + guarded relaxed FMA, 1 threads)",
+      "variant": "relaxed",
+      "wasmSha256": "22933f965fb84d9930255d00771179e6a6df70feb466e22259cb74acd98d4342",
+      "loadMs": 147.29999995231628,
+      "offlineMs": [
+        2635.4000000953674,
+        2582.2000000476837
+      ],
+      "warmPreviewMs": [
+        173.5,
+        162.69999980926514,
+        193.40000009536743,
+        222.5,
+        237.09999990463257,
+        221.20000004768372,
+        250.90000009536743,
+        251.29999995231628,
+        267.09999990463257,
+        268,
+        263.80000019073486,
+        283.7999999523163,
+        282.5,
+        297.7999999523163,
+        297.7999999523163,
+        299.2999999523163,
+        303.5,
+        319.2000000476837,
+        349.10000014305115,
+        331.69999980926514,
+        363,
+        364.10000014305115,
+        410.2000000476837,
+        411.7999999523163,
+        412.2999999523163,
+        414.09999990463257,
+        1386.4000000953674,
+        555.7000000476837,
+        492,
+        538.2000000476837,
+        539.0999999046326,
+        554.5999999046326,
+        568,
+        563.3999998569489,
+        530.1000001430511
+      ],
+      "warmMedianMs": 319.2000000476837,
+      "warmP95Ms": 568,
+      "warmFinalMs": 498.89999985694885,
+      "wasmMemoryBytes": 818741248,
+      "rewindAndRestart": true,
+      "recovery": null,
+      "transcript": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+    },
+    {
+      "model": "streaming-medium",
+      "device": "CPU (WASM SIMD128 + guarded relaxed FMA, 4 threads)",
+      "variant": "threaded",
+      "wasmSha256": "45ccb21f8d982ac287048a59ac832b7bc97fc3d26b58beb71e10b45f19bdb27a",
+      "loadMs": 159.69000005722046,
+      "offlineMs": [
+        881.3050000667572,
+        848.1349999904633
+      ],
+      "warmPreviewMs": [
+        61.795000076293945,
+        56.114999771118164,
+        69.48000001907349,
+        83.75,
+        92.25999999046326,
+        84.44000005722046,
+        99.07000017166138,
+        98.34500002861023,
+        107.46499991416931,
+        108.26999998092651,
+        108.32500004768372,
+        116.75,
+        114.97000002861023,
+        122.25999999046326,
+        122.71499991416931,
+        122.91999983787537,
+        123.9850001335144,
+        131.06499981880188,
+        146.68499994277954,
+        138.64000010490417,
+        153.36500000953674,
+        154.33500003814697,
+        177.38499999046326,
+        176.9449999332428,
+        178.09999990463257,
+        178.02999997138977,
+        669.9800000190735,
+        254.21000003814697,
+        224.00499987602234,
+        254.27999997138977,
+        254.74500012397766,
+        261.9500000476837,
+        261.8199999332428,
+        258.99500012397766,
+        247.6800000667572
+      ],
+      "warmMedianMs": 131.06499981880188,
+      "warmP95Ms": 261.9500000476837,
+      "warmFinalMs": 237.02500009536743,
+      "wasmMemoryBytes": 828178432,
+      "rewindAndRestart": true,
+      "recovery": null,
+      "transcript": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+    },
+    {
+      "model": "streaming-medium",
+      "device": "CPU (WASM SIMD128, 1 threads)",
+      "variant": "plain",
+      "wasmSha256": "09f0bfae68869229de6d670a5b4fbdf3705601a91634e394029512c8726a66a3",
+      "loadMs": 123.79999995231628,
+      "offlineMs": [
+        3748,
+        3707.800000190735
+      ],
+      "warmPreviewMs": [
+        194.89999985694885,
+        201.29999995231628,
+        228.70000004768372,
+        256.40000009536743,
+        270.7999999523163,
+        257,
+        285.7000000476837,
+        285.2000000476837,
+        300.69999980926514,
+        299.5,
+        299.7000000476837,
+        314,
+        315,
+        329,
+        328.90000009536743,
+        329.2000000476837,
+        332.09999990463257,
+        344.7999999523163,
+        374.2000000476837,
+        360.09999990463257,
+        389.10000014305115,
+        391.5,
+        434,
+        435.7000000476837,
+        437.7999999523163,
+        435.7999999523163,
+        1337.4000000953674,
+        572.0999999046326,
+        510.7000000476837,
+        557.7999999523163,
+        555.5,
+        578.7999999523163,
+        576.6000001430511,
+        579.2999999523163,
+        506.7000000476837
+      ],
+      "warmMedianMs": 344.7999999523163,
+      "warmP95Ms": 579.2999999523163,
+      "warmFinalMs": 480.2999999523163,
+      "wasmMemoryBytes": null,
+      "rewindAndRestart": true,
+      "recovery": null,
+      "transcript": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+    },
+    {
+      "model": "streaming-small",
+      "device": "CPU (WASM SIMD128, 1 threads)",
+      "variant": "plain",
+      "wasmSha256": "09f0bfae68869229de6d670a5b4fbdf3705601a91634e394029512c8726a66a3",
+      "loadMs": 66.39999985694885,
+      "offlineMs": [
+        1950.7000000476837,
+        1954.5
+      ],
+      "warmPreviewMs": [
+        159.20000004768372,
+        160.89999985694885,
+        174.90000009536743,
+        181.89999985694885,
+        189.60000014305115,
+        196.09999990463257,
+        210.79999995231628,
+        203.60000014305115,
+        204.39999985694885,
+        204.20000004768372,
+        204.10000014305115,
+        204.59999990463257,
+        219.90000009536743,
+        219.39999985694885,
+        219.70000004768372,
+        227,
+        228.20000004768372,
+        220.29999995231628,
+        242.90000009536743,
+        257.59999990463257,
+        257.90000009536743,
+        266.7999999523163,
+        281.2000000476837,
+        281.2999999523163,
+        281.2999999523163,
+        282.2999999523163,
+        290,
+        358.2999999523163,
+        317.60000014305115,
+        343.7999999523163,
+        329,
+        352.2999999523163,
+        355.7000000476837,
+        354.5,
+        319.7000000476837
+      ],
+      "warmMedianMs": 228.20000004768372,
+      "warmP95Ms": 355.7000000476837,
+      "warmFinalMs": 301.59999990463257,
+      "wasmMemoryBytes": null,
+      "rewindAndRestart": true,
+      "recovery": null,
+      "transcript": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+    },
+    {
+      "model": "streaming-small",
+      "device": "GPU (WebGPU, other)",
+      "variant": "plain",
+      "wasmSha256": "09f0bfae68869229de6d670a5b4fbdf3705601a91634e394029512c8726a66a3",
+      "loadMs": 190.90000009536743,
+      "offlineMs": [
+        185.80000019073486,
+        149.79999995231628
+      ],
+      "warmPreviewMs": [
+        33.700000047683716,
+        23.299999952316284,
+        22.700000047683716,
+        22.699999809265137,
+        33.90000009536743,
+        33.59999990463257,
+        32.90000009536743,
+        32.59999990463257,
+        33.10000014305115,
+        32.5,
+        32.39999985694885,
+        32.60000014305115,
+        43.09999990463257,
+        43.10000014305115,
+        42.89999985694885,
+        43.799999952316284,
+        42.80000019073486,
+        43,
+        43.09999990463257,
+        54.700000047683716,
+        53.299999952316284,
+        53.299999952316284,
+        62.60000014305115,
+        62.799999952316284,
+        62.799999952316284,
+        63.59999990463257,
+        64,
+        83.60000014305115,
+        63,
+        82.70000004768372,
+        72.89999985694885,
+        82.70000004768372,
+        83.70000004768372,
+        82.70000004768372,
+        83.5
+      ],
+      "warmMedianMs": 43.10000014305115,
+      "warmP95Ms": 83.60000014305115,
+      "warmFinalMs": 83.5,
+      "wasmMemoryBytes": null,
+      "rewindAndRestart": true,
+      "recovery": null,
+      "transcript": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+    }
+  ],
+  "acceptance": {
+    "streaming-demo-gpu/demo-browser.json": {
+      "passed": true,
+      "checks": [
+        "Initial page makes no model download or microphone request",
+        "Streaming Medium produces real speech text, actual backend/timing, cached weights, and copyable text",
+        "Real microphone capture shows live previews, preserves edits, flushes final words, and releases the microphone",
+        "Cancel preserves earlier text and releases microphone tracks",
+        "Model switching and final-only selection use the same real engine",
+        "Microphone permission errors show actionable recovery and leave controls usable",
+        "Model loading can be cancelled without changing the transcript",
+        "Failed downloads can be retried successfully with no stale error",
+        "Automatic mode actually falls back to CPU and explains the fallback",
+        "Mobile layout fits 320\u2013390px; no CSP violations, uncaught errors, or external requests"
+      ]
+    },
+    "streaming-demo-cpu/demo-browser.json": {
+      "passed": true,
+      "checks": [
+        "Initial page makes no model download or microphone request",
+        "Streaming Medium produces real speech text, actual backend/timing, cached weights, and copyable text",
+        "A fresh engine reuses the complete large model with network downloads blocked",
+        "Real microphone capture shows live previews, preserves edits, flushes final words, and releases the microphone",
+        "Cancel preserves earlier text and releases microphone tracks",
+        "Model switching and final-only selection use the same real engine",
+        "Microphone permission errors show actionable recovery and leave controls usable",
+        "Model loading can be cancelled without changing the transcript",
+        "Failed downloads can be retried successfully with no stale error",
+        "Automatic mode actually falls back to CPU and explains the fallback",
+        "Mobile layout fits 320\u2013390px; no CSP violations, uncaught errors, or external requests"
+      ]
+    },
+    "streaming-lifecycle.json": {
+      "passed": true,
+      "checks": [
+        {
+          "name": "auto-repeat-recreate",
+          "passed": true
+        },
+        {
+          "name": "explicit-two",
+          "passed": true
+        },
+        {
+          "name": "explicit-four",
+          "passed": true
+        },
+        {
+          "name": "nonisolated",
+          "passed": true
+        },
+        {
+          "name": "destroy-inference",
+          "passed": true
+        },
+        {
+          "name": "destroy-partial-startup",
+          "passed": true
+        },
+        {
+          "name": "mixed-ready-failure",
+          "passed": true
+        },
+        {
+          "name": "late-fatal",
+          "passed": true
+        },
+        {
+          "name": "watchdog-stall",
+          "passed": true
+        }
+      ]
+    },
+    "streaming-dual-resident.json": {
+      "passed": true,
+      "checks": [
+        {
+          "name": "dual-models",
+          "passed": true
+        }
+      ]
+    }
+  },
+  "profile": {
+    "gpu.encoder_and_cross": {
+      "offlineMs": 78.7,
+      "previewMedianMs": 13.518,
+      "finalMs": 13.657
+    },
+    "gpu.decoder": {
+      "offlineMs": 117.824,
+      "previewMedianMs": 47.93,
+      "finalMs": 111.176
+    }
+  },
+  "optimizationBaseline": {
+    "note": "Earlier development snapshots on the same model/host; timings approximate and not simultaneous A/B. Final portable vs matrix runs above are matched controlled comparisons.",
+    "oneSecondBlocksSingleTokenReadback": {
+      "offlineMs": 508,
+      "previewMedianMs": 86,
+      "finalMs": 157
+    },
+    "oneSecondBlocksBatchedReadback": {
+      "offlineMs": 503,
+      "previewMedianMs": 84,
+      "finalMs": 154
+    },
+    "oneSecondBlocksMatrix8": {
+      "offlineMs": 283,
+      "previewMedianMs": 58,
+      "finalMs": 119
+    }
+  }
+}

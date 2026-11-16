@@ -7,7 +7,7 @@
 
 mod cpu;
 mod encoder;
-mod repeat;
+pub(crate) mod repeat;
 
 use std::sync::Mutex;
 

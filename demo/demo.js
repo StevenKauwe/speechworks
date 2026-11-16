@@ -7,7 +7,7 @@ const ui = Object.fromEntries(['record', 'record-label', 'sample', 'cancel', 'st
 let createDictation, manifest, engine, unsubscribe, active, frame;
 let phase = 'idle', initialized = false;
 const microphoneSupported = !!navigator.mediaDevices?.getUserMedia && !!globalThis.AudioContext;
-const modelName = id => id === 'base' ? 'Moonshine Base' : id === 'tiny' ? 'Moonshine Tiny' : id;
+const modelName = id => ({base:'Moonshine Base', tiny:'Moonshine Tiny', 'streaming-medium':'Moonshine Streaming Medium', 'streaming-small':'Moonshine Streaming Small'}[id] || id);
 const join = (left, right) => right ? (left ? `${left.trimEnd()} ${right}` : right) : left;
 const current = operation => active === operation;
 
@@ -231,7 +231,9 @@ function configure() {
   ui.fallback.hidden = true;
   ui.timing.textContent = '';
   ui['model-size'].textContent = `${(manifest.models[ui.model.value].bytes / 1e6).toFixed(1)} MB`;
-  ui['model-hint'].textContent = ui.model.value === 'tiny' ? 'English · smaller download, lighter inference.' : 'English · our default for dictation.';
+  ui['model-hint'].textContent = ui.model.value === 'streaming-medium' ? 'English · built for live dictation · our default.'
+    : ui.model.value === 'streaming-small' ? 'English · built for live dictation · a smaller download.'
+    : 'English · whole-phrase recognition.';
   setPhase('idle', microphoneSupported ? 'Ready when you are. Choose your microphone or the sample.' : 'Microphone capture is unavailable in this browser. Try the sample instead.');
   void refreshCacheNote(getEngine());
 }

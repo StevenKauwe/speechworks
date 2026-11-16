@@ -102,6 +102,7 @@ fn install() -> Result<()> {
         "pool-owner.js",
         "runtime-loader.js",
         "runtime-config.js",
+        "model-cache.js",
         "transcript.js",
         "capture-worklet.js",
         "speechworks_web.js",

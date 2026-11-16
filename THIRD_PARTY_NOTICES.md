@@ -10,6 +10,13 @@ retained in `crates/inference/LICENSE-WAVO` and distributed in `licenses/wavo.tx
 Speechworks adds browser-safe asynchronous GPU operations, uniform parameters,
 in-memory model loading, bounded inference, and device-loss CPU recovery.
 
+The Moonshine Streaming implementation follows the model equations and GGUF
+contract in handy-computer/transcribe.cpp, revision
+`adfc50210a3f026a655a3e19937d90ef2bf0728c` (MIT, copyright 2026 The
+transcribe.cpp authors). Its full license is in `licenses/transcribe-cpp.txt`.
+Speechworks implements its own Rust and WGSL bounded per-layer history caches;
+no C/C++ inference library is linked or downloaded by the application.
+
 The GPU portability design follows Steven Kauwe's BSD-3-Clause tabicl-anywhere;
 the speech kernels are derived from wavo, not the TabICL model.
 
@@ -18,7 +25,7 @@ as `speechworks-vad`. It retains the previous 64 samples (32 at 8 kHz) required
 by the official streaming wrapper, and removes the optional Accelerate dependency.
 Original notices and model provenance are retained in `crates/vad`.
 The embedded Silero v6.2 model is MIT, from Silero Team.
-Moonshine tiny/base model weights are MIT, from Useful Sensors; the default
+Moonshine tiny/base and English Streaming Small/Medium weights are MIT, from Useful Sensors; the default
 manifest pins handy-computer's GGUF conversions by immutable revision, byte
 length and SHA-256. Model files are downloaded at build/install time and served
 by the consuming application. Code and model licenses are separate; applications

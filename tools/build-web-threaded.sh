@@ -23,7 +23,7 @@ out=${SPEECHWORKS_THREAD_DEST:-"$root/dist-threaded"}
 case "$out" in /*) ;; *) out="$root/$out" ;; esac
 relaxed=-relaxed-simd
 if [ "${SPEECHWORKS_THREAD_RELAXED:-0}" = 1 ]; then relaxed=+relaxed-simd; fi
-export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+simd128,$relaxed,+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base"
+export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+simd128,$relaxed,+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base"
 cargo +"$nightly" build --locked --release --target wasm32-unknown-unknown -p speechworks-web --features wasm-threads -Z build-std=panic_abort,std
 mkdir -p "$out"
 "$bindgen" "$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/speechworks_web.wasm" --target web --out-dir "$out" --out-name speechworks_web

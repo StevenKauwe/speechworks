@@ -168,6 +168,7 @@ test('worker emits channel-ready before configuration, and awaits runtime for se
   t.after(() => { globalThis.self = previousSelf; globalThis.fetch = previousFetch; delete globalThis.__speechworksRuntimeTest; });
   const source = (await fs.readFile(new URL('../web/worker.js', import.meta.url), 'utf8'))
     .replace("import {loadRuntime, cpuThreadOption} from './runtime-loader.js';", 'const {loadRuntime, cpuThreadOption, createWorkerOwner} = globalThis.__speechworksRuntimeTest;')
+    .replace("from './model-cache.js'", `from '${new URL('../web/model-cache.js',import.meta.url).href}'`)
     .replace("import {createWorkerOwner} from './pool-owner.js';", '');
   const worker = await import(`data:text/javascript;base64,${Buffer.from(source.replaceAll("new URL('./models.json', import.meta.url)", "new URL('https://example.test/models.json')")).toString('base64')}`);
   worker.startWorker();
@@ -264,7 +265,7 @@ test('legacy ready-then-configure client transcribes serially without pool contr
   const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
     .map(x => x.toString(16).padStart(2, '0')).join('');
   const wasm = {default() {}, DictationSession: class {},
-    loadModel: async () => ({device: () => 'cpu', fallbackReason: () => '', transcribe: () => 'hello world'})};
+    loadModel: async () => ({device: () => 'cpu', fallbackReason: () => '', transcribe: () => 'hello world', resetStream() {}})};
   const loadRuntime = createRuntimeLoader({config: {threadedAvailable: true},
     capabilities: () => ({...supported, hardwareConcurrency: 8}),
     importModule: async path => { imports.push(path); return wasm; }});
@@ -277,6 +278,7 @@ test('legacy ready-then-configure client transcribes serially without pool contr
   t.after(() => { globalThis.self = oldSelf; globalThis.fetch = oldFetch; delete globalThis.__speechworksLegacyTest; });
   const source = (await fs.readFile(new URL('../web/worker.js', import.meta.url), 'utf8'))
     .replace("import {loadRuntime, cpuThreadOption} from './runtime-loader.js';", 'const {loadRuntime, cpuThreadOption, createWorkerOwner} = globalThis.__speechworksLegacyTest;')
+    .replace("from './model-cache.js'", `from '${new URL('../web/model-cache.js',import.meta.url).href}'`)
     .replace("import {createWorkerOwner} from './pool-owner.js';", '')
     .replaceAll("new URL('./models.json', import.meta.url)", "new URL('https://example.test/models.json')");
   const {startWorker} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);

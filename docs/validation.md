@@ -1,5 +1,9 @@
 # Validation
 
+For Moonshine Streaming Medium/Small, incremental caches and the newer native GPU
+optimizations, see [streaming validation](moonshine-streaming.md). The results below
+are the original Tiny/Base baseline.
+
 For the later measured CPU kernel optimization, matched single-thread native
 controls, and cross-machine retest, see [browser CPU performance](wasm-cpu-performance.md).
 

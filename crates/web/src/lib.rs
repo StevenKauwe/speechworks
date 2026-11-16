@@ -1,7 +1,7 @@
 //! Thin browser bindings. Capture and UI remain with the application; the model,
 //! speech detector and phrase boundaries execute in Rust in a worker.
 use speechworks::{Config, DecodeRequest, Session};
-use speechworks_inference::{Backend, Model};
+use speechworks_inference::{Backend, Model, StreamState};
 use speechworks_vad::{SampleRate, SileroVad};
 use wasm_bindgen::prelude::*;
 
@@ -46,6 +46,7 @@ fn js_error(error: impl std::fmt::Display) -> JsValue {
 #[wasm_bindgen]
 pub struct Recognizer {
     model: Model,
+    stream: Option<(String, StreamState)>,
 }
 
 #[wasm_bindgen(js_name = loadModel)]
@@ -64,6 +65,7 @@ pub async fn load_model(bytes: Vec<u8>, backend: String) -> Result<Recognizer, J
     };
     Ok(Recognizer {
         model: Model::from_bytes(bytes, backend).await.map_err(js_error)?,
+        stream: None,
     })
 }
 
@@ -78,6 +80,51 @@ impl Recognizer {
     }
     pub async fn transcribe(&self, samples: &[f32]) -> Result<String, JsValue> {
         Ok(self.model.transcribe(samples).await.map_err(js_error)?.text)
+    }
+    /// A growing, possibly revised phrase. Legacy models retain their existing
+    /// padded-preview behavior; streaming models consume only newly captured
+    /// audio, and append synthetic tail silence once at finalization.
+    #[wasm_bindgen(js_name = transcribePhrase)]
+    pub async fn transcribe_phrase(
+        &mut self,
+        samples: &[f32],
+        key: String,
+        is_final: bool,
+        audio_samples: usize,
+    ) -> Result<String, JsValue> {
+        if audio_samples > samples.len() {
+            return Err(js_error("captured audio length exceeds phrase length"));
+        }
+        if !self.model.is_streaming() {
+            return self.transcribe(samples).await;
+        }
+        let samples = if is_final {
+            samples
+        } else {
+            &samples[..audio_samples]
+        };
+        let reset = self.stream.as_ref().is_none_or(|(id, state)| {
+            id != &key || state.is_finished() || !state.matches_prefix(samples)
+        });
+        if reset {
+            self.stream = Some((key, StreamState::new()));
+        }
+        let (_, state) = self.stream.as_mut().unwrap();
+        let offset = state.samples();
+        let text = self
+            .model
+            .transcribe_chunk(state, &samples[offset..], is_final)
+            .await
+            .map_err(js_error)?
+            .text;
+        if is_final {
+            self.stream = None;
+        }
+        Ok(text)
+    }
+    #[wasm_bindgen(js_name = resetStream)]
+    pub fn reset_stream(&mut self) {
+        self.stream = None;
     }
 }
 
@@ -99,6 +146,10 @@ impl DecodeJob {
     #[wasm_bindgen(getter)]
     pub fn samples(&self) -> Vec<f32> {
         self.request.samples.clone()
+    }
+    #[wasm_bindgen(getter, js_name = audioSamples)]
+    pub fn audio_samples(&self) -> usize {
+        self.request.audio_samples
     }
 }
 
