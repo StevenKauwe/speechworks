@@ -169,6 +169,7 @@ test('worker emits channel-ready before configuration, and awaits runtime for se
   const source = (await fs.readFile(new URL('../web/worker.js', import.meta.url), 'utf8'))
     .replace("import {loadRuntime, cpuThreadOption} from './runtime-loader.js';", 'const {loadRuntime, cpuThreadOption, createWorkerOwner} = globalThis.__speechworksRuntimeTest;')
     .replace("from './model-cache.js'", `from '${new URL('../web/model-cache.js',import.meta.url).href}'`)
+    .replace("from './model-source.js'", `from '${new URL('../web/model-source.js',import.meta.url).href}'`)
     .replace("import {createWorkerOwner} from './pool-owner.js';", '');
   const worker = await import(`data:text/javascript;base64,${Buffer.from(source.replaceAll("new URL('./models.json', import.meta.url)", "new URL('https://example.test/models.json')")).toString('base64')}`);
   worker.startWorker();
@@ -279,6 +280,7 @@ test('legacy ready-then-configure client transcribes serially without pool contr
   const source = (await fs.readFile(new URL('../web/worker.js', import.meta.url), 'utf8'))
     .replace("import {loadRuntime, cpuThreadOption} from './runtime-loader.js';", 'const {loadRuntime, cpuThreadOption, createWorkerOwner} = globalThis.__speechworksLegacyTest;')
     .replace("from './model-cache.js'", `from '${new URL('../web/model-cache.js',import.meta.url).href}'`)
+    .replace("from './model-source.js'", `from '${new URL('../web/model-source.js',import.meta.url).href}'`)
     .replace("import {createWorkerOwner} from './pool-owner.js';", '')
     .replaceAll("new URL('./models.json', import.meta.url)", "new URL('https://example.test/models.json')");
   const {startWorker} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);

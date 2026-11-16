@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -62,11 +62,56 @@ fn validate_destination(root: &Path, dest: &Path) -> Result<()> {
     }
     Ok(())
 }
+fn install_model(
+    file: &Path,
+    stage: &Path,
+    spec: &mut Value,
+    part_bytes: Option<u64>,
+) -> Result<()> {
+    let hash = spec["sha256"].as_str().ok_or("missing model checksum")?;
+    let bytes = spec["bytes"].as_u64().ok_or("missing model size")?;
+    let name = format!("{hash}.gguf");
+    let relative = format!("models/{name}");
+    let object = spec.as_object_mut().ok_or("model must be an object")?;
+    object.remove("parts");
+    object.insert("url".into(), Value::String(relative.clone()));
+    if let Some(limit) = part_bytes.filter(|&limit| bytes > limit) {
+        if limit == 0 {
+            return Err("model part size must be positive".into());
+        }
+        let mut input = fs::File::open(file)?;
+        let mut remaining = bytes;
+        let mut parts = Vec::new();
+        while remaining > 0 {
+            let count = remaining.min(limit);
+            let part = format!("{name}.part-{:03}", parts.len());
+            let mut output = fs::File::create(stage.join("models").join(&part))?;
+            if std::io::copy(&mut (&mut input).take(count), &mut output)? != count {
+                return Err("model changed while being installed".into());
+            }
+            output.flush()?;
+            parts.push(serde_json::json!({"url": part, "bytes": count}));
+            remaining -= count;
+        }
+        object.insert("parts".into(), Value::Array(parts));
+    } else {
+        fs::copy(file, stage.join(relative))?;
+    }
+    Ok(())
+}
 fn install() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let mut options = BTreeMap::new();
     while let Some(key) = args.next() {
-        if !["--root", "--dest", "--model-dir", "--manifest"].contains(&key.as_str()) {
+        if ![
+            "--root",
+            "--dest",
+            "--model-dir",
+            "--manifest",
+            "--model-part-bytes",
+        ]
+        .contains(&key.as_str())
+        {
             return Err(format!("unknown option {key}").into());
         }
         let value = args.next().ok_or("option needs a value")?;
@@ -74,6 +119,16 @@ fn install() -> Result<()> {
     }
     let root = options.get("--root").ok_or("--root is required")?;
     let dest = options.get("--dest").ok_or("--dest is required")?;
+    let part_bytes = options
+        .get("--model-part-bytes")
+        .map(|value| -> Result<u64> {
+            let bytes: u64 = value.to_str().ok_or("invalid model part size")?.parse()?;
+            if !(1024 * 1024..=512 * 1024 * 1024).contains(&bytes) {
+                return Err("model part size must be between 1 and 512 MiB".into());
+            }
+            Ok(bytes)
+        })
+        .transpose()?;
     let cache = options
         .get("--model-dir")
         .cloned()
@@ -103,6 +158,7 @@ fn install() -> Result<()> {
         "runtime-loader.js",
         "runtime-config.js",
         "model-cache.js",
+        "model-source.js",
         "transcript.js",
         "capture-worklet.js",
         "speechworks_web.js",
@@ -187,9 +243,7 @@ fn install() -> Result<()> {
                 }
             }
             verify(&file, bytes, &hash)?;
-            let relative = format!("models/{hash}.gguf");
-            fs::copy(&file, stage.join(&relative))?;
-            spec["url"] = Value::String(relative);
+            install_model(&file, &stage, spec, part_bytes)?;
             // Download locations can include deployment-only signed URLs. The
             // browser only needs the verified same-origin artifact URL.
             spec.as_object_mut()
@@ -239,6 +293,39 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn model_parts_roundtrip_without_oversized_files_or_stale_manifest_parts() {
+        let root = std::env::temp_dir().join(format!(
+            "speechworks-model-parts-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("models")).unwrap();
+        let file = root.join("input");
+        fs::write(&file, b"abcdefghijk").unwrap();
+        let (_, hash) = digest(&file).unwrap();
+        let mut spec = serde_json::json!({"sha256": hash, "bytes": 11});
+        install_model(&file, &root, &mut spec, Some(4)).unwrap();
+        assert!(!root.join(spec["url"].as_str().unwrap()).exists());
+        let mut joined = Vec::new();
+        let parts = spec["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 3);
+        for part in parts {
+            let bytes = fs::read(root.join("models").join(part["url"].as_str().unwrap())).unwrap();
+            assert_eq!(bytes.len() as u64, part["bytes"].as_u64().unwrap());
+            assert!(bytes.len() <= 4);
+            joined.extend(bytes);
+        }
+        assert_eq!(joined, b"abcdefghijk");
+        for limit in [Some(11), Some(20), None] {
+            install_model(&file, &root, &mut spec, limit).unwrap();
+            assert!(spec.get("parts").is_none());
+            verify(&root.join(spec["url"].as_str().unwrap()), 11, &hash).unwrap();
+        }
+        assert!(install_model(&file, &root, &mut spec, Some(0)).is_err());
+        fs::write(&file, b"short").unwrap();
+        assert!(install_model(&file, &root, &mut spec, Some(4)).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn rejects_wrong_hash_and_wrong_size() {
         let path =

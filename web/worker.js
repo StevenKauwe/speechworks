@@ -1,5 +1,6 @@
 import {loadRuntime, cpuThreadOption} from './runtime-loader.js';
 import {cachedModel, cacheModel, deleteCachedModel} from './model-cache.js';
+import {fetchModel} from './model-source.js';
 import {createWorkerOwner} from './pool-owner.js';
 
 const describe = error => error?.message || String(error);
@@ -69,7 +70,7 @@ export function startWorker(options = {}) {
       try { cache = await caches.open('speechworks-models-v1'); } catch { /* Storage may be disabled; inference still works. */ }
       let response = await cachedModel(cache, url.href, spec);
       let fromCache = !!response;
-      if (!response) response = await fetch(url, {redirect:'error'});
+      if (!response) response = await fetchModel(url, spec);
       if (!response.ok) throw new Error(`${id}: HTTP ${response.status}`);
       const reader = response.body?.getReader();
       let bytes;
